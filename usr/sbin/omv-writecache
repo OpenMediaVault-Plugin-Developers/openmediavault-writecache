@@ -256,7 +256,24 @@ def main():
     elif cmd == "unmount":
         cmd_unmount()
     elif cmd == "status":
-        print(open("/proc/mounts").read())
+        lines = []
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                device, mnt, fstype, opts = parts[0], parts[1], parts[2], parts[3]
+                # Base tmpfs for writecache
+                if fstype == "tmpfs" and mnt == "/run/omv-writecache":
+                    lines.append(line.strip())
+                    continue
+                # Overlay mounts created by writecache
+                if fstype == "overlay" and "upperdir=/run/omv-writecache/" in opts:
+                    lines.append(line.strip())
+        if lines:
+            print("\n".join(lines))
+        else:
+            print("No writecache mounts found")
     else:
         print("Unknown command")
         sys.exit(2)

@@ -89,6 +89,7 @@ omv-writecache-setup_service:
         Wants=tmp.mount
         Before=multi-user.target shutdown.target
         Before=rrdcached.service nginx.service nmbd.service postfix@-.service
+        Before=php8.2-fpm.service openmediavault-engined.service
         
         [Service]
         Type=oneshot
