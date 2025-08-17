@@ -183,28 +183,17 @@ def rsync_upper_to_lower(upper_dir, lower_dir):
 
     args = [
         "rsync", "-aHA", "--inplace",
+        "--no-specials", "--no-devices",
         "--delete-excluded",
         "--exclude", ".wh.*",
         upper_dir.rstrip("/") + "/",
         lower_dir.rstrip("/") + "/",
     ]
     proc = run(args)
-    if proc.returncode == 0:
-        return True
-
-    err = (proc.stderr or "") + (proc.stdout or "")
-    if "Operation not supported" in err or "rsync_xal_set" in err:
-        logger.info("Retrying rsync without xattrs due to xattr errors.")
-        args = [
-            "rsync", "-aHA", "--inplace",
-            "--delete-excluded", "--exclude", ".wh.*",
-            upper_dir.rstrip("/") + "/",
-            lower_dir.rstrip("/") + "/"
-        ]
-        proc2 = run(args)
-        return proc2.returncode == 0
-
-    return False
+    if proc.returncode != 0:
+        logger.warning("rsync failed (%s): %s", proc.returncode, (proc.stderr or proc.stdout).strip())
+        return False
+    return True
 
 def flush(cfg):
     errors = 0
