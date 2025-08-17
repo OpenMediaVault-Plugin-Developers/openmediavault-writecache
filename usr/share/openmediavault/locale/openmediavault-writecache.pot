@@ -1,0 +1,63 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the openmediavault-writecache package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: openmediavault-writecache\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-08-17 15:56-0500\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=CHARSET\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "Enabled"
+msgstr ""
+
+msgid "Flush daily"
+msgstr ""
+
+msgid "Flush on shutdown"
+msgstr ""
+
+msgid "Journal storage"
+msgstr ""
+
+msgid "One entry per line <path> = drop|flush"
+msgstr ""
+
+msgid "Overlay paths and policy"
+msgstr ""
+
+msgid "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, 25%."
+msgstr ""
+
+msgid "Will flush at 03:45 daily"
+msgstr ""
+
+msgid "Write Cache"
+msgstr ""
+
+msgid "Write Cache settings"
+msgstr ""
+
+msgid "WriteCache"
+msgstr ""
+
+msgid "auto"
+msgstr ""
+
+msgid "persistent (disk)"
+msgstr ""
+
+msgid "tmpfs size"
+msgstr ""
+
+msgid "volatile (RAM)"
+msgstr ""
