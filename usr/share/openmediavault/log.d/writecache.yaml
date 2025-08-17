@@ -5,13 +5,26 @@ data:
   text: _("Write Cache")
   columns:
     - name: _("Date & Time")
-      sortable: true
       prop: ts
+      sortable: true
       cellTemplateName: localeDateTime
       flexGrow: 1
+    - name: _("Event")
+      prop: event
+      sortable: true
+      flexGrow: 1
+    - name: _("Path")
+      prop: path
+      sortable: true
+      cellTemplateName: copyToClipboard
+      flexGrow: 2
+    - name: _("Policy")
+      prop: policy
+      sortable: true
+      flexGrow: 1
     - name: _("Message")
-      sortable: false
       prop: message
+      sortable: false
       flexGrow: 3
   request:
     service: LogFile
