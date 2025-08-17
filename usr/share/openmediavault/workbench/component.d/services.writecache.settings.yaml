@@ -1,0 +1,48 @@
+version: "1.0"
+type: component
+data:
+  name: omv-services-writecache-settings-form-page
+  type: formPage
+  config:
+    request:
+      service: WriteCache
+      get:
+        method: getSettings
+      post:
+        method: setSettings
+    fields:
+      - type: checkbox
+        name: enable
+        label: _("Enabled")
+        value: true
+      - type: textInput
+        name: tmpfs_size
+        label: _("tmpfs size")
+        value: "25%"
+        hint: _("Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, 25%.")
+      - type: select
+        name: journald_storage
+        label: _("Journal storage")
+        value: "volatile"
+        store:
+          data:
+            - ["auto", _("auto")]
+            - ["volatile", _("volatile (RAM)")]
+            - ["persistent", _("persistent (disk)")]
+      - type: checkbox
+        name: flush_on_shutdown
+        label: _("Flush on shutdown")
+        value: true
+      - type: checkbox
+        name: flush_daily
+        label: _("Flush daily")
+        hint: _("Will flush at 03:45 daily")
+        value: false
+      - type: textarea
+        name: paths
+        label: _("Overlay paths and policy")
+        rows: 10
+        hint: _("One entry per line <path> = drop|flush")
+    buttons:
+      - template: submit
+      - template: cancel

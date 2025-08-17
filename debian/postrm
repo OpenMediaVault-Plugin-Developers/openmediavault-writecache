@@ -1,0 +1,55 @@
+#!/bin/bash
+
+set -e
+
+. /etc/default/openmediavault
+. /usr/share/openmediavault/scripts/helper-functions
+
+remove_action() {
+  dpkg-trigger update-workbench
+  
+  rm -rf /etc/omv-writecache
+  
+  conf="/etc/systemd/journald.conf.d/10-writecache.conf"
+  if [ -e "${conf}" ]; then
+    rm -f "${conf}" || true
+    systemctl reload systemd-journald 2>/dev/null || systemctl try-restart systemd-journald || true
+  fi
+  
+  units=(
+    "omv-writecache-setup.service"
+    "omv-writecache-flush.service"
+    "omv-writecache-flush.timer"
+  )
+  for u in "${units[@]}"; do
+    if [ -f "/etc/systemd/system/${u}" ]; then
+      systemctl disable --now "${u}" >/dev/null 2>&1 || true
+      rm -f "/etc/systemd/system/${u}" 2>/dev/null || true
+    fi
+  done
+  
+  systemctl daemon-reload || true
+  systemctl reset-failed >/dev/null 2>&1 || true
+}
+
+case "$1" in
+  purge)
+    remove_action
+    # Remove the configuration data
+    omv_config_delete "/config/services/writecache"
+  ;;
+
+  remove)
+    remove_action
+  ;;
+
+  upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+  ;;
+
+  *)
+    echo "postrm called with unknown argument '$1'" >&2
+    exit 1
+  ;;
+esac
+
+exit 0

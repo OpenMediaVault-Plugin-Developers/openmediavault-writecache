@@ -1,0 +1,39 @@
+{
+  "type": "config",
+  "id": "conf.service.writecache",
+  "title": "WriteCache",
+  "queryinfo": {
+    "xpath": "/config/services/writecache",
+    "iterable": false
+  },
+  "properties": {
+    "enable": {
+      "type": "boolean",
+      "default": true
+    },
+    "tmpfs_size": {
+      "type": "string",
+      "default": "25%"
+    },
+    "journald_storage": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "volatile",
+        "persistent"
+      ],
+      "default": "volatile"
+    },
+    "flush_on_shutdown": {
+      "type": "boolean",
+      "default": true
+    },
+    "flush_daily": {
+      "type": "boolean",
+      "default": false
+    },
+    "paths": {
+      "type": "string"
+    }
+  }
+}

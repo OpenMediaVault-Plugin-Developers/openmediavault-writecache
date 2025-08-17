@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+import os, sys, subprocess, time, re, shutil
+from pathlib import Path
+
+try:
+    import yaml  # type: ignore
+except Exception:
+    yaml = None
+
+CONFIG = Path("/etc/omv-writecache/config.yaml")
+TMPFS_MOUNT = Path("/run/omv-writecache")
+
+import logging
+logger = logging.getLogger('writecache')
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+if not logger.handlers:
+    logger.addHandler(handler)
+
+def log(msg: str):
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"{ts} - {msg}")
+    try:
+        os.makedirs("/var/log/openmediavault", exist_ok=True)
+        with open("/var/log/openmediavault/writecache.log", "a") as f:
+            f.write(f"{ts} {msg}\n")
+    except Exception:
+        pass
+
+def run(cmd, check=True):
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if res.returncode != 0 and check:
+        log(f"Command failed ({res.returncode}): {' '.join(cmd)}\n{res.stdout.strip()}")
+        raise SystemExit(res.returncode)
+    return res
+
+def load_config():
+    defaults = {
+        "enable": True,
+        "tmpfs_size": "25%",
+        "journald_storage": "volatile",
+        "flush_on_shutdown": True,
+        "flush_daily": False,
+        "paths": "/var/log = drop\n/var/tmp = drop\n/var/cache/apt/archives = drop\n/var/lib/apt/lists = drop\n/var/lib/dpkg/updates = flush\n",
+    }
+    if not CONFIG.exists() or yaml is None:
+        return defaults
+    try:
+        with open(CONFIG) as f:
+            data = yaml.safe_load(f) or {}
+        defaults.update(data)
+    except Exception as e:
+        log(f"Failed to parse config: {e}")
+    return defaults
+
+def parse_paths(paths_text):
+    items = []
+    for line in paths_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            k, v = line.split("=", 1)
+            p = k.strip()
+            mode = v.strip()
+        else:
+            p = line.strip()
+            mode = "drop"
+        items.append((p, mode))
+    # dedupe preserving order
+    seen = set(); res = []
+    for p, mode in items:
+        if p not in seen:
+            res.append((p, mode))
+            seen.add(p)
+    return res
+
+def ensure_tmpfs(size):
+    TMPFS_MOUNT.mkdir(parents=True, exist_ok=True)
+    with open("/proc/mounts") as f:
+        mounts = f.read()
+    if f" {TMPFS_MOUNT} tmpfs " in mounts:
+        return
+    run(["mount", "-t", "tmpfs", "-o", f"size={size},mode=0755", "tmpfs", str(TMPFS_MOUNT)])
+
+def sanitize_name(p):
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", p.strip("/"))
+
+def is_overlay_mounted(path: Path):
+    with open("/proc/mounts") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) >= 3 and parts[1] == str(path):
+                return parts[2] == "overlay"
+    return False
+
+def mount_overlays(cfg):
+    if not cfg.get("enable", True):
+        log("WriteCache disabled; skipping mount.")
+        return
+    ensure_tmpfs(cfg.get("tmpfs_size", "25%"))
+    for path, mode in parse_paths(cfg.get("paths", "")):
+        p = Path(path).resolve()
+        if not p.exists():
+            log(f"Skipping non-existent path: {p}")
+            continue
+        name = sanitize_name(str(p))
+        upper = TMPFS_MOUNT / name / "upper"
+        work = TMPFS_MOUNT / name / "work"
+        upper.mkdir(parents=True, exist_ok=True)
+        work.mkdir(parents=True, exist_ok=True)
+        if is_overlay_mounted(p):
+            log(f"Already overlay-mounted: {p}")
+            continue
+        opts = f"lowerdir={p},upperdir={upper},workdir={work},metacopy=off,redirect_dir=off"
+        res = run(["mount", "-t", "overlay", "overlay", "-o", opts, str(p)], check=False)
+        if res.returncode == 0:
+            log(f"Overlay mounted on {p} with policy {mode}")
+        else:
+            log(f"ERROR: Failed to mount overlay on {p}: {res.stdout.strip()}")
+
+def apply_whiteouts(upper_dir, lower_dir):
+    """
+    Apply overlayfs whiteouts from upper -> lower.
+    - .wh.<name> deletes <name> in lower
+    - .wh..wh..opq makes directory opaque: remove lower entries not present in upper
+    """
+    upper_dir = os.path.abspath(upper_dir)
+    lower_dir = os.path.abspath(lower_dir)
+
+    for root, dirs, files in os.walk(upper_dir, topdown=True):
+        rel = os.path.relpath(root, upper_dir)
+        lower_root = os.path.join(lower_dir, rel) if rel != "." else lower_dir
+
+        # Opaque marker handling
+        if ".wh..wh..opq" in files:
+            try:
+                os.makedirs(lower_root, exist_ok=True)
+                # live names present in upper at this level (excluding whiteouts)
+                upper_live = set(n for n in (files + dirs)
+                                 if not n.startswith(".wh.") and n != ".wh..wh..opq")
+                try:
+                    lower_entries = os.listdir(lower_root)
+                except FileNotFoundError:
+                    lower_entries = []
+                for name in lower_entries:
+                    if name not in upper_live:
+                        target = os.path.join(lower_root, name)
+                        if os.path.isdir(target) and not os.path.islink(target):
+                            shutil.rmtree(target, ignore_errors=True)
+                        else:
+                            try:
+                                os.remove(target)
+                            except FileNotFoundError:
+                                pass
+            except Exception as e:
+                logger.warning("Opaque cleanup failed at %s: %s", lower_root, e)
+
+        # Regular whiteouts
+        for f in files:
+            if f.startswith(".wh.") and f != ".wh..wh..opq":
+                target = os.path.join(lower_root, f[4:])
+                if os.path.isdir(target) and not os.path.islink(target):
+                    shutil.rmtree(target, ignore_errors=True)
+                else:
+                    try:
+                        os.remove(target)
+                    except FileNotFoundError:
+                        pass
+def rsync_upper_to_lower(upper_dir, lower_dir):
+    """
+    Sync overlayfs upper -> lower.
+    - Apply whiteouts before rsync.
+    - Preserve ACLs, hardlinks, xattrs, but filter out overlay’s internal xattrs.
+    - Retry without xattrs if the FS still rejects them.
+    """
+    os.makedirs(lower_dir, exist_ok=True)
+    upper_dir = os.path.abspath(upper_dir)
+    lower_dir = os.path.abspath(lower_dir)
+
+    apply_whiteouts(upper_dir, lower_dir)
+
+    args = [
+        "rsync", "-aHA", "--inplace",
+        "--delete-excluded",
+        "--exclude", ".wh.*",
+        upper_dir.rstrip("/") + "/",
+        lower_dir.rstrip("/") + "/",
+    ]
+    proc = run(args)
+    if proc.returncode == 0:
+        return True
+
+    err = (proc.stderr or "") + (proc.stdout or "")
+    if "Operation not supported" in err or "rsync_xal_set" in err:
+        logger.info("Retrying rsync without xattrs due to xattr errors.")
+        args = [
+            "rsync", "-aHA", "--inplace",
+            "--delete-excluded", "--exclude", ".wh.*",
+            upper_dir.rstrip("/") + "/",
+            lower_dir.rstrip("/") + "/"
+        ]
+        proc2 = run(args)
+        return proc2.returncode == 0
+
+    return False
+
+def flush(cfg):
+    errors = 0
+    for path, mode in parse_paths(cfg.get("paths", "")):
+        if mode not in ("flush", "persist", "writeback"):
+            continue
+        p = Path(path).resolve()
+        name = sanitize_name(str(p))
+        upper = TMPFS_MOUNT / name / "upper"
+        if not upper.exists():
+            continue
+        try:
+            rsync_upper_to_lower(str(upper), str(p))
+            log(f"Flushed changes for {p}")
+        except Exception as e:
+            errors += 1
+            log(f"ERROR flushing {p}: {e}")
+    return errors == 0
+
+def unmount(cfg):
+    paths = [Path(p).resolve() for p, _ in parse_paths(cfg.get("paths",""))]
+    for p in sorted(paths, key=lambda x: len(str(x)), reverse=True):
+        if is_overlay_mounted(p):
+            run(["umount", "-l", str(p)], check=False)
+    with open("/proc/mounts") as f:
+        mounts = f.read()
+    if f" {TMPFS_MOUNT} tmpfs " in mounts:
+        run(["umount", "-l", str(TMPFS_MOUNT)], check=False)
+
+def cmd_mount():
+    cfg = load_config()
+    if cfg.get("enable", True):
+        mount_overlays(cfg)
+    else:
+        log("Disabled; not mounting.")
+
+def cmd_flush():
+    cfg = load_config()
+    ok = flush(cfg)
+    sys.exit(0 if ok else 1)
+
+def cmd_unmount():
+    cfg = load_config()
+    if cfg.get("flush_on_shutdown", True):
+        flush(cfg)
+    unmount(cfg)
+
+def main():
+    if os.geteuid() != 0:
+        print("This tool must be run as root", file=sys.stderr)
+        sys.exit(1)
+    if len(sys.argv) < 2:
+        print("Usage: omv-writecache [mount|flush|unmount|status]")
+        sys.exit(2)
+    cmd = sys.argv[1]
+    if cmd == "mount":
+        cmd_mount()
+    elif cmd == "flush":
+        cmd_flush()
+    elif cmd == "unmount":
+        cmd_unmount()
+    elif cmd == "status":
+        print(open("/proc/mounts").read())
+    else:
+        print("Unknown command")
+        sys.exit(2)
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,20 @@
+version: "1.0"
+type: log
+data:
+  id: writecache
+  text: _("Write Cache")
+  columns:
+    - name: _("Date & Time")
+      sortable: true
+      prop: ts
+      cellTemplateName: localeDateTime
+      flexGrow: 1
+    - name: _("Message")
+      sortable: false
+      prop: message
+      flexGrow: 3
+  request:
+    service: LogFile
+    method: getList
+    params:
+      id: writecache
