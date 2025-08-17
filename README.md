@@ -1,6 +1,6 @@
 # openmediavault-writecache
 
-OverlayFS-based write reduction plugin for OpenMediaVault 7 (Debian 12).
+OverlayFS-based write reduction plugin for openmediavault 7
 
 ## Highlights
 - Uses tmpfs + overlayfs for selected write-heavy system paths (e.g., `/var/log`, APT cache).
@@ -15,11 +15,5 @@ OverlayFS-based write reduction plugin for OpenMediaVault 7 (Debian 12).
 sudo /usr/sbin/omv-writecache mount
 sudo /usr/sbin/omv-writecache flush
 sudo /usr/sbin/omv-writecache unmount
+sudo /usr/sbin/omv-writecache status
 ```
-
-### Packaging
-Standard debhelper packaging. Build with:
-```bash
-dpkg-buildpackage -us -uc -b
-```
-Then install the resulting `openmediavault-writecache_*.deb`.
