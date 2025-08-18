@@ -2,16 +2,16 @@
 
 require_once("openmediavault/functions.inc");
 
-
 \OMV\System\LogFileSpec::registerSpecification("omv-writecache", [
-    "filename" => "writecache.log",
-    "filepath" => "/var/log/openmediavault/writecache.log",
-    // 1: timestamp, 2: event, 3: path, 4: policy (optional)
-    "regex" => "/^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+(Overlay mounted on|Flushed changes for)\s+(\S+)(?:\s+with policy\s+(\w+))?$/",
+    "filename" => "omv-writecache.log",
+    "filepath" => "/var/log/omv-writecache.log",
+    // Matches: YYYY-MM-DD HH:MM:SS [LEVEL] EVENT: details
+    // 1: timestamp, 2: level, 3: event, 4: details/path
+    "regex" => "/^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+\[(\w+)\]\s+([^:]+):\s*(.*)$/",
     "columns" => [
-        "date"   => 1,
-        "event"  => 2,
-        "path"   => 3,
-        "policy" => 4
+        "date" => 1,
+        "level" => 2,
+        "event" => 3,
+        "details" => 4
     ]
 ]);

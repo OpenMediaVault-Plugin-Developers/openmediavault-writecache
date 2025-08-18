@@ -9,30 +9,32 @@ except Exception:
 
 CONFIG = Path("/etc/omv-writecache/config.yaml")
 TMPFS_MOUNT = Path("/run/omv-writecache")
+LOG_FILE = "/var/log/omv-writecache.log"
 
-import logging
-logger = logging.getLogger('writecache')
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-if not logger.handlers:
-    logger.addHandler(handler)
-
-def log(msg: str):
+def log(msg: str, level: str = "INFO"):
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"{ts} - {msg}")
     try:
-        os.makedirs("/var/log/openmediavault", exist_ok=True)
-        with open("/var/log/openmediavault/writecache.log", "a") as f:
-            f.write(f"{ts} {msg}\n")
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        with open(LOG_FILE, "a") as f:
+            f.write(f"{ts} [{level}] {msg}\n")
     except Exception:
         pass
 
 def run(cmd, check=True):
+    cmd_str = ' '.join(cmd)
+    log(f"CMD: {cmd_str}", "DEBUG")
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    if res.returncode != 0 and check:
-        log(f"Command failed ({res.returncode}): {' '.join(cmd)}\n{res.stdout.strip()}")
-        raise SystemExit(res.returncode)
+    if res.returncode != 0:
+        log(f"CMD_FAILED: {cmd_str} (exit {res.returncode})", "ERROR")
+        if res.stdout.strip():
+            log(f"OUTPUT: {res.stdout.strip()}", "ERROR")
+        if check:
+            raise SystemExit(res.returncode)
+    else:
+        log(f"CMD_OK: {cmd_str}", "DEBUG")
+        if res.stdout.strip():
+            log(f"OUTPUT: {res.stdout.strip()}", "DEBUG")
     return res
 
 def load_config():
@@ -45,13 +47,15 @@ def load_config():
         "paths": "/var/log = drop\n/var/tmp = drop\n/var/cache/apt/archives = drop\n/var/lib/apt/lists = drop\n/var/lib/dpkg/updates = flush\n",
     }
     if not CONFIG.exists() or yaml is None:
+        log("CONFIG: Using defaults", "DEBUG")
         return defaults
     try:
         with open(CONFIG) as f:
             data = yaml.safe_load(f) or {}
         defaults.update(data)
+        log(f"CONFIG: Loaded from {CONFIG}", "DEBUG")
     except Exception as e:
-        log(f"Failed to parse config: {e}")
+        log(f"CONFIG_ERROR: {e}", "ERROR")
     return defaults
 
 def parse_paths(paths_text):
@@ -81,7 +85,9 @@ def ensure_tmpfs(size):
     with open("/proc/mounts") as f:
         mounts = f.read()
     if f" {TMPFS_MOUNT} tmpfs " in mounts:
+        log(f"TMPFS_EXISTS: {TMPFS_MOUNT}")
         return
+    log(f"TMPFS_MOUNT: {TMPFS_MOUNT} size={size}")
     run(["mount", "-t", "tmpfs", "-o", f"size={size},mode=0755", "tmpfs", str(TMPFS_MOUNT)])
 
 def sanitize_name(p):
@@ -97,13 +103,13 @@ def is_overlay_mounted(path: Path):
 
 def mount_overlays(cfg):
     if not cfg.get("enable", True):
-        log("WriteCache disabled; skipping mount.")
+        log("DISABLED: WriteCache disabled", "WARN")
         return
     ensure_tmpfs(cfg.get("tmpfs_size", "25%"))
     for path, mode in parse_paths(cfg.get("paths", "")):
         p = Path(path).resolve()
         if not p.exists():
-            log(f"Skipping non-existent path: {p}")
+            log(f"SKIP_MISSING: {p}", "WARN")
             continue
         name = sanitize_name(str(p))
         upper = TMPFS_MOUNT / name / "upper"
@@ -111,14 +117,15 @@ def mount_overlays(cfg):
         upper.mkdir(parents=True, exist_ok=True)
         work.mkdir(parents=True, exist_ok=True)
         if is_overlay_mounted(p):
-            log(f"Already overlay-mounted: {p}")
+            log(f"ALREADY_MOUNTED: {p}")
             continue
         opts = f"lowerdir={p},upperdir={upper},workdir={work},metacopy=off,redirect_dir=off"
+        log(f"OVERLAY_MOUNT: {p} policy={mode}")
         res = run(["mount", "-t", "overlay", "overlay", "-o", opts, str(p)], check=False)
         if res.returncode == 0:
-            log(f"Overlay mounted on {p} with policy {mode}")
+            log(f"MOUNTED: {p} policy={mode}")
         else:
-            log(f"ERROR: Failed to mount overlay on {p}: {res.stdout.strip()}")
+            log(f"MOUNT_FAILED: {p}", "ERROR")
 
 def apply_whiteouts(upper_dir, lower_dir):
     """
@@ -128,6 +135,7 @@ def apply_whiteouts(upper_dir, lower_dir):
     """
     upper_dir = os.path.abspath(upper_dir)
     lower_dir = os.path.abspath(lower_dir)
+    log(f"Applying whiteouts from {upper_dir} to {lower_dir}")
 
     for root, dirs, files in os.walk(upper_dir, topdown=True):
         rel = os.path.relpath(root, upper_dir)
@@ -154,8 +162,9 @@ def apply_whiteouts(upper_dir, lower_dir):
                                 os.remove(target)
                             except FileNotFoundError:
                                 pass
+                log(f"Applied opaque whiteout at {lower_root}")
             except Exception as e:
-                logger.warning("Opaque cleanup failed at %s: %s", lower_root, e)
+                log(f"Opaque cleanup failed at {lower_root}: {e}")
 
         # Regular whiteouts
         for f in files:
@@ -168,17 +177,20 @@ def apply_whiteouts(upper_dir, lower_dir):
                         os.remove(target)
                     except FileNotFoundError:
                         pass
+                log(f"Applied whiteout for {target}")
+
 def rsync_upper_to_lower(upper_dir, lower_dir):
     """
     Sync overlayfs upper -> lower.
     - Apply whiteouts before rsync.
-    - Preserve ACLs, hardlinks, xattrs, but filter out overlay’s internal xattrs.
+    - Preserve ACLs, hardlinks, xattrs, but filter out overlay's internal xattrs.
     - Retry without xattrs if the FS still rejects them.
     """
     os.makedirs(lower_dir, exist_ok=True)
     upper_dir = os.path.abspath(upper_dir)
     lower_dir = os.path.abspath(lower_dir)
 
+    log(f"RSYNC: {upper_dir} -> {lower_dir}", "DEBUG")
     apply_whiteouts(upper_dir, lower_dir)
 
     args = [
@@ -189,55 +201,81 @@ def rsync_upper_to_lower(upper_dir, lower_dir):
         upper_dir.rstrip("/") + "/",
         lower_dir.rstrip("/") + "/",
     ]
-    proc = run(args)
+    proc = run(args, check=False)
     if proc.returncode != 0:
-        logger.warning("rsync failed (%s): %s", proc.returncode, (proc.stderr or proc.stdout).strip())
+        log(f"RSYNC_FAILED: exit {proc.returncode}", "ERROR")
         return False
+    log(f"RSYNC_OK: {upper_dir} -> {lower_dir}", "DEBUG")
     return True
 
 def flush(cfg):
+    log("FLUSH_START: Beginning flush operation")
     errors = 0
     for path, mode in parse_paths(cfg.get("paths", "")):
         if mode not in ("flush", "persist", "writeback"):
+            log(f"SKIP_MODE: {path} mode={mode}", "DEBUG")
             continue
         p = Path(path).resolve()
         name = sanitize_name(str(p))
         upper = TMPFS_MOUNT / name / "upper"
         if not upper.exists():
+            log(f"NO_UPPER: {p}", "DEBUG")
             continue
         try:
-            rsync_upper_to_lower(str(upper), str(p))
-            log(f"Flushed changes for {p}")
+            if rsync_upper_to_lower(str(upper), str(p)):
+                log(f"FLUSHED: {p}")
+            else:
+                errors += 1
+                log(f"FLUSH_FAILED: {p}", "ERROR")
         except Exception as e:
             errors += 1
-            log(f"ERROR flushing {p}: {e}")
+            log(f"FLUSH_ERROR: {p} - {e}", "ERROR")
+
+    if errors == 0:
+        log("FLUSH_COMPLETE: Success")
+    else:
+        log(f"FLUSH_COMPLETE: {errors} errors", "ERROR")
     return errors == 0
 
 def unmount(cfg):
+    log("UNMOUNT_START: Beginning unmount operation")
     paths = [Path(p).resolve() for p, _ in parse_paths(cfg.get("paths",""))]
     for p in sorted(paths, key=lambda x: len(str(x)), reverse=True):
         if is_overlay_mounted(p):
+            log(f"UNMOUNT: {p}")
             run(["umount", "-l", str(p)], check=False)
+        else:
+            log(f"NOT_MOUNTED: {p}", "DEBUG")
+
     with open("/proc/mounts") as f:
         mounts = f.read()
     if f" {TMPFS_MOUNT} tmpfs " in mounts:
+        log(f"TMPFS_UNMOUNT: {TMPFS_MOUNT}")
         run(["umount", "-l", str(TMPFS_MOUNT)], check=False)
+    else:
+        log(f"TMPFS_NOT_MOUNTED: {TMPFS_MOUNT}", "DEBUG")
+
+    log("UNMOUNT_COMPLETE: Finished")
 
 def cmd_mount():
+    log("MOUNT_CMD: Starting mount command")
     cfg = load_config()
     if cfg.get("enable", True):
         mount_overlays(cfg)
     else:
-        log("Disabled; not mounting.")
+        log("DISABLED: Not mounting", "WARN")
 
 def cmd_flush():
+    log("FLUSH_CMD: Starting flush command")
     cfg = load_config()
     ok = flush(cfg)
     sys.exit(0 if ok else 1)
 
 def cmd_unmount():
+    log("UNMOUNT_CMD: Starting unmount command")
     cfg = load_config()
     if cfg.get("flush_on_shutdown", True):
+        log("PRE_UNMOUNT_FLUSH: Flushing before unmount")
         flush(cfg)
     unmount(cfg)
 
@@ -249,6 +287,9 @@ def main():
         print("Usage: omv-writecache [mount|flush|unmount|status]")
         sys.exit(2)
     cmd = sys.argv[1]
+
+    log(f"SCRIPT_START: omv-writecache {cmd}")
+
     if cmd == "mount":
         cmd_mount()
     elif cmd == "flush":
@@ -256,6 +297,7 @@ def main():
     elif cmd == "unmount":
         cmd_unmount()
     elif cmd == "status":
+        log("STATUS_CMD: Starting status command")
         lines = []
         with open("/proc/mounts") as f:
             for line in f:
@@ -272,11 +314,16 @@ def main():
                     lines.append(line.strip())
         if lines:
             print("\n".join(lines))
+            log(f"STATUS: Found {len(lines)} writecache mounts")
         else:
             print("No writecache mounts found")
+            log("STATUS: No writecache mounts found")
     else:
+        log(f"UNKNOWN_CMD: {cmd}", "ERROR")
         print("Unknown command")
         sys.exit(2)
+
+    log(f"SCRIPT_END: omv-writecache {cmd}")
 
 if __name__ == "__main__":
     main()
