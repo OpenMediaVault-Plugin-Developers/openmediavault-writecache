@@ -8,8 +8,10 @@ Homepage: https://github.com/OpenMediaVault-Plugin-Developers
 
 Package: openmediavault-writecache
 Architecture: all
-Depends: ${misc:Depends}, openmediavault (>= 7.0.0), python3, rsync, util-linux, jq
-Description: OpenMediaVault plugin to reduce OS writes using tmpfs+overlayfs
+Depends: openmediavault (>= 7.7.14),
+         jq,
+         ${misc:Depends}
+Description: openmediavault plugin to reduce OS writes using tmpfs+overlayfs
  Provides an overlay-based write cache for selected system directories
  (e.g., /var/log, APT caches) using tmpfs as the upperdir. Changes can be
  dropped on reboot or flushed on demand / shutdown via systemd units.
