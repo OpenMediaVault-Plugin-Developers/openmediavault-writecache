@@ -101,6 +101,38 @@ def is_overlay_mounted(path: Path):
                 return parts[2] == "overlay"
     return False
 
+def find_bad_specials(upper_dir: Path):
+    bad = []
+    for root, dirs, files in os.walk(upper_dir, topdown=True):
+        for name in files:
+            # skip proper overlay whiteouts
+            if name.startswith(".wh."):
+                continue
+            p = Path(root) / name
+            try:
+                st = os.lstat(p)
+            except FileNotFoundError:
+                continue
+            # stat.S_ISCHR -> character device
+            if (st.st_mode & 0o170000) == 0o020000:  # chr dev
+                bad.append(str(p))
+    return bad
+
+def scrub_bad_specials(upper_dir: Path):
+    bad = find_bad_specials(upper_dir)
+    if not bad:
+        return False, []
+    for p in bad:
+        try:
+            os.remove(p)
+        except IsADirectoryError:
+            shutil.rmtree(p, ignore_errors=True)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log(f"SCRUB_ERROR: {p}: {e}", "ERROR")
+    return True, bad
+
 def mount_overlays(cfg):
     if not cfg.get("enable", True):
         log("DISABLED: WriteCache disabled", "WARN")
@@ -116,6 +148,9 @@ def mount_overlays(cfg):
         work = TMPFS_MOUNT / name / "work"
         upper.mkdir(parents=True, exist_ok=True)
         work.mkdir(parents=True, exist_ok=True)
+        changed, bad = scrub_bad_specials(upper)
+        if changed:
+            log(f"SCRUBBED_BAD_SPECIALS: {len(bad)} removed under {upper}")
         if is_overlay_mounted(p):
             log(f"ALREADY_MOUNTED: {p}")
             continue
@@ -221,6 +256,9 @@ def flush(cfg):
         if not upper.exists():
             log(f"NO_UPPER: {p}", "DEBUG")
             continue
+        changed, bad = scrub_bad_specials(upper)
+        if changed:
+            log(f"SCRUBBED_BAD_SPECIALS_BEFORE_FLUSH: {len(bad)} removed under {upper}")
         try:
             if rsync_upper_to_lower(str(upper), str(p)):
                 log(f"FLUSHED: {p}")
