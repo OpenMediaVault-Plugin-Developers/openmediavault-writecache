@@ -1,8 +1,8 @@
 version: "1.0"
 type: route
 data:
-  url: "/services/writecache/settings"
+  url: "/services/writecache"
   title: _("WriteCache")
   editing: true
   notificationTitle: _("Write Cache settings")
-  component: omv-services-writecache-settings-form-page
+  component: omv-services-writecache-form-page

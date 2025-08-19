@@ -1,7 +1,7 @@
 version: "1.0"
 type: component
 data:
-  name: omv-services-writecache-settings-form-page
+  name: omv-services-writecache-form-page
   type: formPage
   config:
     request:
