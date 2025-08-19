@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+#
+# Copyright (c) 2025 openmediavault plugin developers
+#
+# This file is licensed under the terms of the GNU General Public
+# License version 2. This program is licensed "as is" without any
+# warranty of any kind, whether express or implied.
+#
+# version: 0.0.1
+#
 import os, sys, subprocess, time, re, shutil
 from pathlib import Path
 
@@ -237,11 +246,14 @@ def rsync_upper_to_lower(upper_dir, lower_dir):
         lower_dir.rstrip("/") + "/",
     ]
     proc = run(args, check=False)
-    if proc.returncode != 0:
-        log(f"RSYNC_FAILED: exit {proc.returncode}", "ERROR")
-        return False
-    log(f"RSYNC_OK: {upper_dir} -> {lower_dir}", "DEBUG")
-    return True
+    if proc.returncode == 0:
+        log(f"RSYNC_OK: {upper_dir} -> {lower_dir}", "DEBUG")
+        return True
+    elif proc.returncode == 24:
+        log(f"RSYNC_WARN: {upper_dir} -> {lower_dir} (files vanished during transfer)", "WARN")
+        return True   # treat as success
+    log(f"RSYNC_FAILED: exit {proc.returncode}", "ERROR")
+    return False
 
 def flush(cfg):
     log("FLUSH_START: Beginning flush operation")
