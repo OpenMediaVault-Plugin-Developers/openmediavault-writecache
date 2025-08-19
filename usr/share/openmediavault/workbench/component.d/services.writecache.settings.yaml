@@ -46,3 +46,20 @@ data:
     buttons:
       - template: submit
       - template: cancel
+      - text: _("Flush")
+        enabledConstraint:
+          operator: truthy
+          arg0:
+            prop: enable
+        execute:
+          type: taskDialog
+          taskDialog:
+            config:
+              title: _("Running manual flush ...")
+              startOnInit: true
+              request:
+                service: WriteCache
+                method: doFlush
+              buttons:
+                stop:
+                  hidden: true

@@ -27,6 +27,7 @@ class OMVRpcServiceWriteCache extends \OMV\Rpc\ServiceAbstract
     {
         $this->registerMethod("getSettings");
         $this->registerMethod("setSettings");
+        $this->registerMethod("doFlush");
     }
 
     public function getSettings($params, $context)
@@ -55,5 +56,25 @@ class OMVRpcServiceWriteCache extends \OMV\Rpc\ServiceAbstract
         $db->set($object);
         // Return the configuration object.
         return $object->getAssoc();
+    }
+
+    public function doFlush($params, $context)
+    {
+        // Validate the RPC caller context.
+        $this->validateMethodContext($context, ['role' => OMV_ROLE_ADMINISTRATOR]);
+        // Create the background process.
+        return $this->execBgProc(function($bgStatusFilename, $bgOutputFilename)
+            use ($params) {
+                $cmd = new \OMV\System\Process('omv-writecache flush');
+                $cmd->setRedirect2to1();
+                $cmdLine = $cmd->getCommandLine();
+                if (0 !== $this->exec($cmdLine, $output, $bgOutputFilename)) {
+                    $msg = PHP_EOL . PHP_EOL . implode(PHP_EOL, $output);
+                    file_put_contents($bgOutputFilename, $msg, FILE_APPEND);
+                    throw new \OMV\ExecException($cmdLine, $output);
+                }
+                return $output;
+            }
+        );
     }
 }
