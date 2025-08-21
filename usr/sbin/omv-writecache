@@ -227,8 +227,9 @@ def rsync_upper_to_lower(upper_dir, lower_dir):
     """
     Sync overlayfs upper -> lower.
     - Apply whiteouts before rsync.
-    - Preserve ACLs, hardlinks, xattrs, but filter out overlay's internal xattrs.
-    - Retry without xattrs if the FS still rejects them.
+    - Preserve perms, times, ACLs, hardlinks (no xattrs).
+    - Avoid specials/devices so we don't mknod transient files.
+    - Treat rsync 23/24 as non-fatal (vanished files etc.).
     """
     os.makedirs(lower_dir, exist_ok=True)
     upper_dir = os.path.abspath(upper_dir)
@@ -240,7 +241,6 @@ def rsync_upper_to_lower(upper_dir, lower_dir):
     args = [
         "rsync", "-aHA", "--inplace",
         "--no-specials", "--no-devices",
-        "--delete-excluded",
         "--exclude", ".wh.*",
         upper_dir.rstrip("/") + "/",
         lower_dir.rstrip("/") + "/",
@@ -249,11 +249,30 @@ def rsync_upper_to_lower(upper_dir, lower_dir):
     if proc.returncode == 0:
         log(f"RSYNC_OK: {upper_dir} -> {lower_dir}", "DEBUG")
         return True
-    elif proc.returncode == 24:
-        log(f"RSYNC_WARN: {upper_dir} -> {lower_dir} (files vanished during transfer)", "WARN")
-        return True   # treat as success
+    if proc.returncode in (23, 24):
+        # Partial/vanished files — OK for log dirs and ephemeral paths
+        log(f"RSYNC_WARN({proc.returncode}): {upper_dir} -> {lower_dir} (partial/vanished files)", "WARN")
+        return True
     log(f"RSYNC_FAILED: exit {proc.returncode}", "ERROR")
     return False
+
+
+def clear_upper_dir(upper_dir: str):
+    """Remove all entries from the upper dir (including .wh.* and subdirs)."""
+    for entry in os.listdir(upper_dir):
+        if entry in ('.', '..'):
+            continue
+        p = os.path.join(upper_dir, entry)
+        try:
+            if os.path.isdir(p) and not os.path.islink(p):
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                os.remove(p)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log(f"CLEAR_UPPER_WARN: failed to remove {p}: {e}", "WARN")
+
 
 def flush(cfg):
     log("FLUSH_START: Beginning flush operation")
@@ -268,11 +287,12 @@ def flush(cfg):
         if not upper.exists():
             log(f"NO_UPPER: {p}", "DEBUG")
             continue
-        changed, bad = scrub_bad_specials(upper)
+        changed, bad = scrub_bad_specials(str(upper))
         if changed:
             log(f"SCRUBBED_BAD_SPECIALS_BEFORE_FLUSH: {len(bad)} removed under {upper}")
         try:
             if rsync_upper_to_lower(str(upper), str(p)):
+                clear_upper_dir(str(upper))
                 log(f"FLUSHED: {p}")
             else:
                 errors += 1
