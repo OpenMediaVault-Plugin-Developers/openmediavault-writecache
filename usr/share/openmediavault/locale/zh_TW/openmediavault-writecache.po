@@ -3,6 +3,9 @@
 # This file is distributed under the same license as the openmediavault-writecache package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
 # 
+# Translators:
+# kochin <kochinc@outlook.com>, 2025
+# 
 #, fuzzy
 msgid ""
 msgstr ""
@@ -10,6 +13,7 @@ msgstr ""
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2025-08-17 15:56-0500\n"
 "PO-Revision-Date: 2025-08-17 20:57+0000\n"
+"Last-Translator: kochin <kochinc@outlook.com>, 2025\n"
 "Language-Team: Chinese (Taiwan) (https://app.transifex.com/openmediavault-plugin-developers/teams/1854/zh_TW/)\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
@@ -18,48 +22,48 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 
 msgid "Enabled"
-msgstr ""
+msgstr "已啟用"
 
 msgid "Flush daily"
-msgstr ""
+msgstr "毎日清除"
 
 msgid "Flush on shutdown"
-msgstr ""
+msgstr "關機時清除"
 
 msgid "Journal storage"
-msgstr ""
+msgstr "日誌儲存空間"
 
 msgid "One entry per line <path> = drop|flush"
-msgstr ""
+msgstr "每行一個輸入項目 <path> = drop|flush"
 
 msgid "Overlay paths and policy"
-msgstr ""
+msgstr "覆蓋路徑及策略"
 
 msgid ""
 "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, "
 "25%."
-msgstr ""
+msgstr "分配給 /run/omv-writecache tmpfs 的空間大小。可接受 %、M/G 後綴字；例如：512M、2G、25%。"
 
 msgid "Will flush at 03:45 daily"
-msgstr ""
+msgstr "將於每日 03:45 清除"
 
 msgid "Write Cache"
-msgstr ""
+msgstr "寫出快取"
 
 msgid "Write Cache settings"
-msgstr ""
+msgstr "寫出快取設定"
 
 msgid "WriteCache"
-msgstr ""
+msgstr "WriteCache"
 
 msgid "auto"
-msgstr ""
+msgstr "自動"
 
 msgid "persistent (disk)"
-msgstr ""
+msgstr "持續性 (硬碟)"
 
 msgid "tmpfs size"
-msgstr ""
+msgstr "tmpfs 大小"
 
 msgid "volatile (RAM)"
-msgstr ""
+msgstr "易失性 (RAM)"

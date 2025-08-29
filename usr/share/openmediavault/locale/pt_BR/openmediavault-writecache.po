@@ -3,6 +3,9 @@
 # This file is distributed under the same license as the openmediavault-writecache package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
 # 
+# Translators:
+# Marcelo Esteves <marcelopge@gmail.com>, 2025
+# 
 #, fuzzy
 msgid ""
 msgstr ""
@@ -10,6 +13,7 @@ msgstr ""
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2025-08-17 15:56-0500\n"
 "PO-Revision-Date: 2025-08-17 20:57+0000\n"
+"Last-Translator: Marcelo Esteves <marcelopge@gmail.com>, 2025\n"
 "Language-Team: Portuguese (Brazil) (https://app.transifex.com/openmediavault-plugin-developers/teams/1854/pt_BR/)\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
@@ -18,48 +22,50 @@ msgstr ""
 "Plural-Forms: nplurals=3; plural=(n == 0 || n == 1) ? 0 : n != 0 && n % 1000000 == 0 ? 1 : 2;\n"
 
 msgid "Enabled"
-msgstr ""
+msgstr "Habilitado"
 
 msgid "Flush daily"
-msgstr ""
+msgstr "Limpar diariamente"
 
 msgid "Flush on shutdown"
-msgstr ""
+msgstr "Limpar ao desligar"
 
 msgid "Journal storage"
-msgstr ""
+msgstr "Armazenamento journal"
 
 msgid "One entry per line <path> = drop|flush"
-msgstr ""
+msgstr "Uma entrada por linha <path> = descartar|limpar"
 
 msgid "Overlay paths and policy"
-msgstr ""
+msgstr "Caminhos e políticas de sobreposição"
 
 msgid ""
 "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, "
 "25%."
 msgstr ""
+"Tamanho para /run/omv-writecache tmpfs. Aceita %, sufixo M/G; por exemplo, "
+"512M, 2G, 25%."
 
 msgid "Will flush at 03:45 daily"
-msgstr ""
+msgstr "Será descarregado às 03:45 diariamente"
 
 msgid "Write Cache"
-msgstr ""
+msgstr "Cache de gravação"
 
 msgid "Write Cache settings"
-msgstr ""
+msgstr "Configurações de cache de gravação"
 
 msgid "WriteCache"
-msgstr ""
+msgstr "WriteCache"
 
 msgid "auto"
-msgstr ""
+msgstr "auto"
 
 msgid "persistent (disk)"
-msgstr ""
+msgstr "persistente (disco)"
 
 msgid "tmpfs size"
-msgstr ""
+msgstr "tamanho tmpfs"
 
 msgid "volatile (RAM)"
-msgstr ""
+msgstr "volátil (RAM)"
