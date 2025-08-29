@@ -122,22 +122,6 @@ omv-writecache-flush_service:
     - group: root
     - mode: 0644
 
-omv-writecache-flush_timer:
-  file.managed:
-    - name: "/etc/systemd/system/omv-writecache-flush.timer"
-    - contents: |
-        [Unit]
-        Description=Daily flush of OMV WriteCache changes
-        
-        [Timer]
-        OnCalendar=*-*-* 03:45:00
-        Persistent=true
-        
-        [Install]
-        WantedBy=timers.target
-    - user: root
-    - group: root
-    - mode: 0644
 
 writecache_systemctl_daemon_reload:
   module.run:
@@ -145,7 +129,6 @@ writecache_systemctl_daemon_reload:
     - onchanges:
       - file: omv-writecache-setup_service
       - file: omv-writecache-flush_service
-      - file: omv-writecache-flush_timer
 
 {% if config.enable | to_bool %}
 
@@ -183,18 +166,21 @@ writecache_flush_service_disable:
 
 {% if config.enable | to_bool and config.flush_daily | to_bool %}
 
-writecache_flush_timer_enable:
-  service.running:
-    - name: omv-writecache-flush.timer
-    - enable: True
-    - require:
-      - file: omv-writecache-flush_timer
+omv_writecache_cron:
+  file.managed:
+    - name: /etc/cron.d/omv-writecache
+    - user: root
+    - group: root
+    - mode: 0644
+    - contents: |
+        {{ pillar['headers']['auto_generated'] }}
+        {{ pillar['headers']['warning'] }}
+        45 3 * * * root /usr/sbin/omv-writecache flush >/dev/null 2>&1
 
 {% else %}
 
-writecache_flush_timer_disable:
-  service.dead:
-    - name: omv-writecache-flush.timer
-    - enable: False
+remove_writecache_cron:
+  file.absent:
+    - name: /etc/cron.d/omv-writecache
 
 {% endif %}
