@@ -70,9 +70,6 @@ def release_lock():
         else:
             log(f"Lock file {LOCK_FILE} not removed (owned by PID {existing_pid}).")
 
-    if LOCK_FILE and os.path.exists(LOCK_FILE):
-        os.remove(LOCK_FILE)
-
 def handle_signal(signum, frame):
     # Handle termination signals to release the lock properly
     print(f"Received signal {signum}, cleaning up...")
@@ -393,60 +390,75 @@ def flush(cfg):
         if mode not in ("flush", "persist", "writeback"):
             log(f"SKIP_MODE: {path} mode={mode}", "DEBUG")
             continue
+
         p = Path(path).resolve()
         name = sanitize_name(str(p))
         upper = TMPFS_MOUNT / name / "upper"
-        work  = TMPFS_MOUNT / name / "work"
+        work = TMPFS_MOUNT / name / "work"
         if not upper.exists():
             log(f"NO_UPPER: {p}", "DEBUG")
             continue
-        # 0) ensure lower bind exists
+
         lower = lower_bind_for(name)
         if not is_mountpoint(lower):
             lower = ensure_lower_bind(p, name)
-        # 1) unmount the overlay target first
+
+        # Unmount overlay so lower changes are seen on remount
         if is_overlay_mounted(p):
             log(f"PRE-FLUSH_UNMOUNT: {p}")
             run(["umount", "-l", str(p)], check=False)
-        # 2) flip lower bind to RW, rsync upper -> lower, flip back to RO
-        remount_lower(lower, rw=True)
-        ok = rsync_upper_to_lower(str(upper), str(lower))
-        remount_lower(lower, rw=False)
+
+        ok = False
+        try:
+            # RW for rsync
+            remount_lower(lower, rw=True)
+
+            # scrub before syncing (whiteouts/opaque markers)
+            changed, bad = scrub_bad_specials(str(upper))
+            opq_removed = 0
+            try:
+                opq_removed = clear_overlay_opq_and_whiteouts(upper)
+            except Exception:
+                pass
+            if changed or opq_removed:
+                log(f"SCRUBBED_UPPER: specials={len(bad)} opq_removed={opq_removed} under {upper}")
+
+            # actual flush
+            ok = rsync_upper_to_lower(str(upper), str(lower))
+
+        except Exception as e:
+            errors += 1
+            log(f"FLUSH_ERROR: {p} - {e}", "ERROR")
+        finally:
+            # ALWAYS go back to RO
+            try:
+                remount_lower(lower, rw=False)
+            except Exception as e2:
+                errors += 1
+                log(f"LOWER_RO_RESTORE_FAILED: {lower} - {e2}", "ERROR")
+
         if ok:
-            # optional: clear_overlay_opq_and_whiteouts(upper)
-            clear_upper_dir(str(upper))
-            log(f"FLUSHED: {p}")
-        # 3) remount the overlay (always)
+            # post-sync cleanup of upper
+            try:
+                try:
+                    clear_overlay_opq_and_whiteouts(upper)
+                except Exception:
+                    pass
+                clear_upper_dir(str(upper))
+                log(f"FLUSHED: {p}")
+            except Exception as e:
+                errors += 1
+                log(f"CLEAR_UPPER_FAILED: {upper} - {e}", "ERROR")
+        else:
+            log(f"FLUSH_FAILED: {p}", "ERROR")
+
+        # Remount overlay (always) so merged view sees the new lower state
         opts = f"lowerdir={lower},upperdir={upper},workdir={work},metacopy=off,redirect_dir=off"
         log(f"POST-FLUSH_MOUNT: {p} lowerdir={lower}")
         run(["mount", "-t", "overlay", "overlay", "-o", opts, str(p)], check=False)
-        changed, bad = scrub_bad_specials(str(upper))
-        opq_removed = clear_overlay_opq_and_whiteouts(upper)
-        if changed or opq_removed:
-            log(f"SCRUBBED_UPPER: specials={len(bad)} opq_removed={opq_removed} under {upper}")
-        # always write to the real lower via the bind
-        lower = lower_bind_for(name)
-        if not is_mountpoint(lower):
-            lower = ensure_lower_bind(p, name)
-        try:
-            remount_lower(lower, rw=True)
-            ok = rsync_upper_to_lower(str(upper), str(lower))
-            remount_lower(lower, rw=False)
-            if ok:
-                clear_overlay_opq_and_whiteouts(upper)
-                clear_upper_dir(str(upper))
-                log(f"FLUSHED: {p}")
-            else:
-                errors += 1
-                log(f"FLUSH_FAILED: {p}", "ERROR")
-        except Exception as e:
-            try:
-                remount_lower(lower, rw=False)
-            except Exception:
-                pass
-            errors += 1
-            log(f"FLUSH_ERROR: {p} - {e}", "ERROR")
-    log("FLUSH_COMPLETE: Success" if errors == 0 else f"FLUSH_COMPLETE: {errors} errors", "ERROR" if errors else "INFO")
+
+    log("FLUSH_COMPLETE: Success" if errors == 0 else f"FLUSH_COMPLETE: {errors} errors",
+        "ERROR" if errors else "INFO")
     return errors == 0
 
 def unmount(cfg):
