@@ -6,9 +6,10 @@
 # License version 2. This program is licensed "as is" without any
 # warranty of any kind, whether express or implied.
 #
-# version: 0.0.1
+# version: 0.0.2
 #
 import os, sys, subprocess, time, re, shutil
+import atexit, signal
 from pathlib import Path
 
 try:
@@ -20,6 +21,9 @@ CONFIG = Path("/etc/omv-writecache/config.yaml")
 TMPFS_MOUNT = Path("/run/omv-writecache")
 LOG_FILE = "/var/log/omv-writecache.log"
 
+LOCK_FILE = None
+ARRAY_LOCK = None
+
 def log(msg: str, level: str = "INFO"):
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"{ts} - {msg}")
@@ -29,6 +33,78 @@ def log(msg: str, level: str = "INFO"):
             f.write(f"{ts} [{level}] {msg}\n")
     except Exception:
         pass
+
+# locking
+def get_lock_filename(lockname):
+    return f"/run/{lockname}.lock"
+
+def check_and_create_lock(lockname):
+    global LOCK_FILE
+    global ARRAY_LOCK
+    LOCK_FILE = get_lock_filename(lockname)
+    ARRAY_LOCK = lockname
+
+    if os.path.exists(LOCK_FILE):
+        with open(LOCK_FILE, 'r') as f:
+            existing_pid = f.read().strip()
+            if existing_pid and existing_pid.isdigit():
+                existing_pid = int(existing_pid)
+                if os.path.exists(f"/proc/{existing_pid}"):
+                    log(f"Instance with lock name {lockname} and PID {existing_pid} is already running!")
+                    sys.exit(1)
+
+    # Write current process PID to the lock file
+    with open(LOCK_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+
+    atexit.register(release_lock)  # Ensure lock is removed on exit
+    log(f"Lock file {LOCK_FILE} created.")
+
+def release_lock():
+    if LOCK_FILE and os.path.exists(LOCK_FILE):
+        with open(LOCK_FILE, 'r') as f:
+            existing_pid = f.read().strip()
+        if str(os.getpid()) == existing_pid:  # Only remove if the PIDs match
+            os.remove(LOCK_FILE)
+            log(f"Lock file {LOCK_FILE} released.")
+        else:
+            log(f"Lock file {LOCK_FILE} not removed (owned by PID {existing_pid}).")
+
+    if LOCK_FILE and os.path.exists(LOCK_FILE):
+        os.remove(LOCK_FILE)
+
+def handle_signal(signum, frame):
+    # Handle termination signals to release the lock properly
+    print(f"Received signal {signum}, cleaning up...")
+    sys.exit(1)
+
+
+def lower_bind_for(name: str) -> Path:
+    return TMPFS_MOUNT / name / "lower"
+
+def is_mountpoint(path: Path) -> bool:
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == str(path):
+                    return True
+    except Exception:
+        pass
+    return False
+
+def ensure_lower_bind(real_path: Path, name: str) -> Path:
+    lower = lower_bind_for(name)
+    lower.mkdir(parents=True, exist_ok=True)
+    if not is_mountpoint(lower):
+        run(["mount", "--bind", str(real_path), str(lower)], check=False)
+        run(["mount", "--make-private", str(lower)], check=False)
+    # Always force RO (even if it was already mounted)
+    remount_lower(lower, rw=False)
+    return lower
+
+def remount_lower(lower: Path, rw: bool):
+    run(["mount", "-o", f"remount,{'rw' if rw else 'ro'},bind", str(lower)], check=False)
 
 def run(cmd, check=True):
     cmd_str = ' '.join(cmd)
@@ -142,6 +218,33 @@ def scrub_bad_specials(upper_dir: Path):
             log(f"SCRUB_ERROR: {p}: {e}", "ERROR")
     return True, bad
 
+def clear_overlay_opq_and_whiteouts(upper_dir: Path) -> int:
+    """Remove .wh..wh..opq and any .wh.* entries under upper_dir (depth 1)."""
+    removed = 0
+    try:
+        opq = upper_dir / ".wh..wh..opq"
+        if opq.exists():
+            opq.unlink(missing_ok=True)
+            removed += 1
+        # Remove xattr if set
+        try:
+            import os
+            os.setxattr(str(upper_dir), b"trusted.overlay.opaque", b"")
+            # if above doesn’t clear on your Python, fallback to setfattr via run()
+        except Exception:
+            run(["setfattr", "-x", "trusted.overlay.opaque", str(upper_dir)], check=False)
+
+        # Remove per-file whiteouts directly under this dir
+        for p in upper_dir.glob(".wh*"):
+            try:
+                p.unlink()
+                removed += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return removed
+
 def mount_overlays(cfg):
     if not cfg.get("enable", True):
         log("DISABLED: WriteCache disabled", "WARN")
@@ -149,6 +252,10 @@ def mount_overlays(cfg):
     ensure_tmpfs(cfg.get("tmpfs_size", "25%"))
     for path, mode in parse_paths(cfg.get("paths", "")):
         p = Path(path).resolve()
+        # Do not allow overlay targets inside our workspace (e.g., lower/upper/work)
+        if str(p).startswith(str(TMPFS_MOUNT) + "/") or str(p) == str(TMPFS_MOUNT):
+            log(f"SKIP_WORKSPACE_PATH: refusing to overlay {p}", "ERROR")
+            continue
         if not p.exists():
             log(f"SKIP_MISSING: {p}", "WARN")
             continue
@@ -163,8 +270,14 @@ def mount_overlays(cfg):
         if is_overlay_mounted(p):
             log(f"ALREADY_MOUNTED: {p}")
             continue
-        opts = f"lowerdir={p},upperdir={upper},workdir={work},metacopy=off,redirect_dir=off"
-        log(f"OVERLAY_MOUNT: {p} policy={mode}")
+        # Use a bind of the real path as the overlay's lowerdir
+        lower = ensure_lower_bind(p, name)
+        # If something mounted overlay on the lower bind path, tear it down
+        if is_overlay_mounted(lower):
+            log(f"FIXUP: overlay was mounted on lower bind {lower}; unmounting", "ERROR")
+            run(["umount", "-l", str(lower)], check=False)
+        opts = f"lowerdir={lower},upperdir={upper},workdir={work},metacopy=off,redirect_dir=off,index=off"
+        log(f"OVERLAY_MOUNT: {p} policy={mode} lowerdir={lower}")
         res = run(["mount", "-t", "overlay", "overlay", "-o", opts, str(p)], check=False)
         if res.returncode == 0:
             log(f"MOUNTED: {p} policy={mode}")
@@ -273,7 +386,6 @@ def clear_upper_dir(upper_dir: str):
         except Exception as e:
             log(f"CLEAR_UPPER_WARN: failed to remove {p}: {e}", "WARN")
 
-
 def flush(cfg):
     log("FLUSH_START: Beginning flush operation")
     errors = 0
@@ -284,39 +396,85 @@ def flush(cfg):
         p = Path(path).resolve()
         name = sanitize_name(str(p))
         upper = TMPFS_MOUNT / name / "upper"
+        work  = TMPFS_MOUNT / name / "work"
         if not upper.exists():
             log(f"NO_UPPER: {p}", "DEBUG")
             continue
+        # 0) ensure lower bind exists
+        lower = lower_bind_for(name)
+        if not is_mountpoint(lower):
+            lower = ensure_lower_bind(p, name)
+        # 1) unmount the overlay target first
+        if is_overlay_mounted(p):
+            log(f"PRE-FLUSH_UNMOUNT: {p}")
+            run(["umount", "-l", str(p)], check=False)
+        # 2) flip lower bind to RW, rsync upper -> lower, flip back to RO
+        remount_lower(lower, rw=True)
+        ok = rsync_upper_to_lower(str(upper), str(lower))
+        remount_lower(lower, rw=False)
+        if ok:
+            # optional: clear_overlay_opq_and_whiteouts(upper)
+            clear_upper_dir(str(upper))
+            log(f"FLUSHED: {p}")
+        # 3) remount the overlay (always)
+        opts = f"lowerdir={lower},upperdir={upper},workdir={work},metacopy=off,redirect_dir=off"
+        log(f"POST-FLUSH_MOUNT: {p} lowerdir={lower}")
+        run(["mount", "-t", "overlay", "overlay", "-o", opts, str(p)], check=False)
         changed, bad = scrub_bad_specials(str(upper))
-        if changed:
-            log(f"SCRUBBED_BAD_SPECIALS_BEFORE_FLUSH: {len(bad)} removed under {upper}")
+        opq_removed = clear_overlay_opq_and_whiteouts(upper)
+        if changed or opq_removed:
+            log(f"SCRUBBED_UPPER: specials={len(bad)} opq_removed={opq_removed} under {upper}")
+        # always write to the real lower via the bind
+        lower = lower_bind_for(name)
+        if not is_mountpoint(lower):
+            lower = ensure_lower_bind(p, name)
         try:
-            if rsync_upper_to_lower(str(upper), str(p)):
+            remount_lower(lower, rw=True)
+            ok = rsync_upper_to_lower(str(upper), str(lower))
+            remount_lower(lower, rw=False)
+            if ok:
+                clear_overlay_opq_and_whiteouts(upper)
                 clear_upper_dir(str(upper))
                 log(f"FLUSHED: {p}")
             else:
                 errors += 1
                 log(f"FLUSH_FAILED: {p}", "ERROR")
         except Exception as e:
+            try:
+                remount_lower(lower, rw=False)
+            except Exception:
+                pass
             errors += 1
             log(f"FLUSH_ERROR: {p} - {e}", "ERROR")
-
-    if errors == 0:
-        log("FLUSH_COMPLETE: Success")
-    else:
-        log(f"FLUSH_COMPLETE: {errors} errors", "ERROR")
+    log("FLUSH_COMPLETE: Success" if errors == 0 else f"FLUSH_COMPLETE: {errors} errors", "ERROR" if errors else "INFO")
     return errors == 0
 
 def unmount(cfg):
     log("UNMOUNT_START: Beginning unmount operation")
-    paths = [Path(p).resolve() for p, _ in parse_paths(cfg.get("paths",""))]
+    items = list(parse_paths(cfg.get("paths","")))
+    # 1) remove any overlay mounted ON the lower bind
+    for path, _ in items:
+        name = sanitize_name(str(Path(path).resolve()))
+        lower = lower_bind_for(name)
+        if is_overlay_mounted(lower):
+            log(f"LOWER_OVERLAY_UNMOUNT: {lower}")
+            run(["umount", "-l", str(lower)], check=False)
+
+    # 2) unmount main overlays deepest-first
+    paths = [Path(p).resolve() for p, _ in items]
     for p in sorted(paths, key=lambda x: len(str(x)), reverse=True):
+        name = sanitize_name(str(p))
+        lower = lower_bind_for(name)
         if is_overlay_mounted(p):
             log(f"UNMOUNT: {p}")
             run(["umount", "-l", str(p)], check=False)
         else:
             log(f"NOT_MOUNTED: {p}", "DEBUG")
+        if is_mountpoint(lower):
+            log(f"LOWER_UNMOUNT: {lower}")
+            run(["umount", "-l", str(lower)], check=False)
 
+    # 3) drop tmpfs if nothing is using it
     with open("/proc/mounts") as f:
         mounts = f.read()
     if f" {TMPFS_MOUNT} tmpfs " in mounts:
@@ -324,7 +482,6 @@ def unmount(cfg):
         run(["umount", "-l", str(TMPFS_MOUNT)], check=False)
     else:
         log(f"TMPFS_NOT_MOUNTED: {TMPFS_MOUNT}", "DEBUG")
-
     log("UNMOUNT_COMPLETE: Finished")
 
 def cmd_mount():
@@ -357,6 +514,9 @@ def main():
         print("Usage: omv-writecache [mount|flush|unmount|status]")
         sys.exit(2)
     cmd = sys.argv[1]
+
+    if cmd in ["mount","flush","unmount"]:
+        check_and_create_lock("omv-writecache")
 
     log(f"SCRIPT_START: omv-writecache {cmd}")
 
@@ -395,5 +555,17 @@ def main():
 
     log(f"SCRIPT_END: omv-writecache {cmd}")
 
+    if cmd in ["mount","flush","unmount"]:
+        # release lock
+        release_lock()
+
+
+# Handle termination signals (Ctrl+C, kill command)
+signal.signal(signal.SIGINT, handle_signal)   # Handle Ctrl+C
+signal.signal(signal.SIGTERM, handle_signal)  # Handle termination (kill command)
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        release_lock()
