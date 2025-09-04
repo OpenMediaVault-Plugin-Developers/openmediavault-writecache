@@ -511,11 +511,11 @@ def main():
         print("This tool must be run as root", file=sys.stderr)
         sys.exit(1)
     if len(sys.argv) < 2:
-        print("Usage: omv-writecache [mount|flush|unmount|status]")
+        print("Usage: omv-writecache [mount|flush|unmount|remount|status]")
         sys.exit(2)
     cmd = sys.argv[1]
 
-    if cmd in ["mount","flush","unmount"]:
+    if cmd in ["mount","flush","unmount","remount"]:
         check_and_create_lock("omv-writecache")
 
     log(f"SCRIPT_START: omv-writecache {cmd}")
@@ -526,6 +526,9 @@ def main():
         cmd_flush()
     elif cmd == "unmount":
         cmd_unmount()
+    elif cmd == "remount":
+        cmd_unmount()
+        cmd_mount()
     elif cmd == "status":
         log("STATUS_CMD: Starting status command")
         lines = []
@@ -555,7 +558,7 @@ def main():
 
     log(f"SCRIPT_END: omv-writecache {cmd}")
 
-    if cmd in ["mount","flush","unmount"]:
+    if cmd in ["mount","flush","unmount","remount"]:
         # release lock
         release_lock()
 
