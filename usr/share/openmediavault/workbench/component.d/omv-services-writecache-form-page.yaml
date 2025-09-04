@@ -63,3 +63,20 @@ data:
               buttons:
                 stop:
                   hidden: true
+      - text: _("Test")
+        enabledConstraint:
+          operator: truthy
+          arg0:
+            prop: enable
+        execute:
+          type: taskDialog
+          taskDialog:
+            config:
+              title: _("Running test ...")
+              startOnInit: true
+              request:
+                service: WriteCache
+                method: doTest
+              buttons:
+                stop:
+                  hidden: true
