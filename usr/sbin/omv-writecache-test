@@ -1,0 +1,458 @@
+#!/usr/bin/env python3
+#
+# Copyright (c) 2025 openmediavault plugin developers
+#
+# This file is licensed under the terms of the GNU General Public
+# License version 2. This program is licensed "as is" without any
+# warranty of any kind, whether express or implied.
+#
+# version: 0.0.1
+#
+# Test script for omv-writecache
+# Uses the REAL config at /etc/omv-writecache/config.yaml and tests
+# mount, flush, and unmount operations with the configured policies.
+#
+import os
+import sys
+import time
+import shutil
+import subprocess
+import hashlib
+import json
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, List, Tuple, Optional
+
+# -------- Settings --------
+CONFIG_PATH = Path("/etc/omv-writecache/config.yaml")
+TEST_LOG = Path("/tmp/omv-writecache-test.log")
+SCRIPT_PATH = "/usr/sbin/omv-writecache"
+
+# Optional: only create test files in these paths (leave empty to allow all)
+ALLOWED_FOR_FILE_CREATION = set()  # e.g., {"/var/log", "/var/tmp"} to restrict
+
+# -------- Colors / logging --------
+class Colors:
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    MAGENTA = '\033[95m'
+    CYAN = '\033[96m'
+    WHITE = '\033[97m'
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+
+def colored(text: str, color: str) -> str:
+    if sys.stdout.isatty():
+        return f"{color}{text}{Colors.RESET}"
+    return text
+
+def log_test(msg: str, level: str = "INFO"):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    color_map = {
+        "INFO": Colors.CYAN,
+        "SUCCESS": Colors.GREEN,
+        "FAIL": Colors.RED,
+        "WARN": Colors.YELLOW,
+        "DEBUG": Colors.WHITE
+    }
+    color = color_map.get(level, Colors.WHITE)
+    print(f"[{colored(timestamp, Colors.WHITE)}] {colored(level, color)}: {msg}")
+    try:
+        with open(TEST_LOG, "a") as f:
+            f.write(f"[{timestamp}] {level}: {msg}\n")
+    except Exception:
+        pass
+
+# -------- Helpers --------
+def load_real_config_paths() -> Dict[str, str]:
+    """
+    Read /etc/omv-writecache/config.yaml and return {path: policy}.
+    Expects a 'paths' multi-line string with lines like: "/var/log = flush"
+    """
+    if not CONFIG_PATH.exists():
+        raise RuntimeError(f"Config not found: {CONFIG_PATH}")
+
+    try:
+        import yaml
+        cfg = yaml.safe_load(CONFIG_PATH.read_text())
+    except Exception as e:
+        raise RuntimeError(f"Failed to read YAML config: {e}")
+
+    paths_block = cfg.get("paths", "") or ""
+    result: Dict[str, str] = {}
+    for raw in str(paths_block).splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        left, right = line.split("=", 1)
+        path = left.strip()
+        policy = right.strip().lower()
+        if path and policy:
+            result[path] = policy
+    if not result:
+        raise RuntimeError("No paths parsed from config 'paths' block.")
+    return result
+
+def require_root():
+    if os.geteuid() != 0:
+        print(colored("This test must be run as root (sudo).", Colors.RED))
+        sys.exit(1)
+
+def ensure_script():
+    if not Path(SCRIPT_PATH).exists():
+        print(colored(f"Script not found at {SCRIPT_PATH}. Edit SCRIPT_PATH in this test.", Colors.RED))
+        sys.exit(1)
+    os.chmod(SCRIPT_PATH, 0o755)
+
+def run_cmd2(cmd: str) -> Tuple[bool, str]:
+    full_cmd = [SCRIPT_PATH, cmd]
+    log_test(f"Running: {' '.join(full_cmd)}", "DEBUG")
+    try:
+        res = subprocess.run(full_cmd, cwd="/", capture_output=True, text=True, timeout=60)
+        out = res.stdout + res.stderr
+        if res.returncode != 0:
+            log_test(f"Command failed ({cmd}): {out}", "WARN")
+            return False, out
+        return True, out
+    except subprocess.TimeoutExpired:
+        log_test(f"Command timed out: {cmd}", "FAIL")
+        return False, "Timeout"
+    except Exception as e:
+        log_test(f"Command error: {e}", "FAIL")
+        return False, str(e)
+
+def run_cmd(cmd: str) -> Tuple[bool, str]:
+    """
+    Run omv-writecache subcommand from a safe cwd so unmount/remount
+    won't invalidate the child's working directory.
+    """
+    from pathlib import Path
+    import os, subprocess
+
+    # Resolve script path to an absolute path; fall back to /usr/sbin/omv-writecache
+    sp = Path(SCRIPT_PATH)
+    if not sp.is_absolute():
+        try:
+            sp = sp.resolve(strict=True)
+        except Exception:
+            pass
+    if not sp.exists():
+        sp = Path("/usr/sbin/omv-writecache")
+
+    # Build command (use sudo if not root)
+    full_cmd = [str(sp), cmd]
+    if os.geteuid() != 0:
+        full_cmd = ["sudo"] + full_cmd
+
+    log_test(f"Running: {' '.join(full_cmd)}", "DEBUG")
+
+    # Keep a sane env (preserve PATH); force safe cwd
+    env = os.environ.copy()
+
+    try:
+        res = subprocess.run(
+            full_cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd="/",              # <- critical: safe working directory
+            env=env
+        )
+        out = (res.stdout or "") + (res.stderr or "")
+        if res.returncode != 0:
+            log_test(f"Command failed ({cmd}): {out}", "WARN")
+            return False, out
+        return True, out
+    except subprocess.TimeoutExpired:
+        log_test(f"Command timed out: {cmd}", "FAIL")
+        return False, "Timeout"
+    except Exception as e:
+        log_test(f"Command error: {e}", "FAIL")
+        return False, str(e)
+
+def check_overlay_mounted(path: str) -> bool:
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] == path and parts[2] == "overlay":
+                    return True
+    except Exception:
+        pass
+    return False
+
+# -------- Test file helper --------
+class TestFile:
+    def __init__(self, path: Path, content: Optional[str] = None):
+        self.path = path
+        self.content = content or f"Test content for {path.name} at {time.time()}"
+        self.checksum = hashlib.md5(self.content.encode()).hexdigest()
+
+    def create(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(self.content)
+        os.sync()
+
+    def exists(self) -> bool:
+        return self.path.exists()
+
+    def verify(self) -> bool:
+        if not self.exists():
+            return False
+        try:
+            current = self.path.read_text()
+            return hashlib.md5(current.encode()).hexdigest() == self.checksum
+        except Exception:
+            return False
+
+    def delete(self):
+        try:
+            if self.exists():
+                self.path.unlink()
+        except Exception:
+            pass
+
+# -------- Test runner --------
+class WriteCacheRealTest:
+    def __init__(self):
+        self.config_paths = load_real_config_paths()
+        self.test_files: Dict[str, List[TestFile]] = {}
+
+    def create_test_files(self, tag: str):
+        log_test(f"Creating test files: {tag}", "INFO")
+        created = 0
+        for path, policy in self.config_paths.items():
+            if ALLOWED_FOR_FILE_CREATION and path not in ALLOWED_FOR_FILE_CREATION:
+                log_test(f"Skipping file creation in {path} (not in ALLOWED_FOR_FILE_CREATION)", "DEBUG")
+                continue
+            base = Path(path)
+            files: List[TestFile] = []
+            for i in range(2):
+                fname = f"omvwc_{tag}_{i}_{int(time.time())}.txt"
+                tf = TestFile(base / fname)
+                try:
+                    tf.create()
+                    files.append(tf)
+                    created += 1
+                    log_test(f"Created {tf.path} (policy={policy})", "DEBUG")
+                except Exception as e:
+                    log_test(f"Failed to create {tf.path}: {e}", "WARN")
+            # subdir file
+            subdir = base / f"omvwc_subdir_{tag}"
+            try:
+                subdir.mkdir(parents=True, exist_ok=True)
+                subfile = TestFile(subdir / "subfile.txt")
+                subfile.create()
+                files.append(subfile)
+                created += 1
+            except Exception as e:
+                log_test(f"Failed to create subdir in {base}: {e}", "WARN")
+            self.test_files[f"{path}:{tag}"] = files
+        log_test(f"Created {created} test files total", "SUCCESS")
+
+    def verify_files(self, tag: str, should_exist: bool) -> bool:
+        ok_all = True
+        for path, _ in self.config_paths.items():
+            key = f"{path}:{tag}"
+            files = self.test_files.get(key, [])
+            for tf in files:
+                exists = tf.exists()
+                valid = tf.verify() if exists else False
+                if should_exist:
+                    if not (exists and valid):
+                        ok_all = False
+                        log_test(f"Verify FAIL (missing/corrupt): {tf.path}", "FAIL")
+                else:
+                    if exists:
+                        ok_all = False
+                        log_test(f"Verify FAIL (should be gone): {tf.path}", "FAIL")
+        return ok_all
+
+    def verify_persistence_per_policy(self, tag: str) -> bool:
+        """
+        After UNMOUNT, verify files according to policy:
+          - drop       -> files should NOT exist
+          - flush/persist/writeback -> files SHOULD exist (assuming flush_on_shutdown=True)
+        """
+        ok_all = True
+        for path, policy in self.config_paths.items():
+            key = f"{path}:{tag}"
+            files = self.test_files.get(key, [])
+    
+            expected_exists = policy in ("flush", "persist", "writeback")
+            path_ok = True
+    
+            for tf in files:
+                exists = tf.exists()
+                valid = tf.verify() if exists else False
+    
+                if expected_exists:
+                    if not (exists and valid):
+                        path_ok = False
+                        ok_all = False
+                        log_test(f"[{policy}] expected PRESENT after unmount: {tf.path}", "FAIL")
+                else:
+                    # drop: must be gone
+                    if exists:
+                        path_ok = False
+                        ok_all = False
+                        log_test(f"[{policy}] expected ABSENT after unmount: {tf.path}", "FAIL")
+    
+            if path_ok:
+                if expected_exists:
+                    log_test(f"[{policy}] persisted OK: {path}", "SUCCESS")
+                else:
+                    log_test(f"[{policy}] dropped OK: {path}", "SUCCESS")
+    
+        return ok_all
+
+
+    def delete_test_files(self, tag: str):
+        log_test(f"Deleting test files: {tag}", "INFO")
+        for path, _ in self.config_paths.items():
+            key = f"{path}:{tag}"
+            files = self.test_files.get(key, [])
+            for tf in files:
+                tf.delete()
+
+    def run(self) -> Dict[str, bool]:
+        results = {
+            "mount": False,
+            "file_creation": False,
+            "flush": False,
+            "deletion": False,
+            "unmount": False,
+            "persistence": False,
+        }
+
+        # Mount
+        log_test("\n>>> Test 1: mount", "INFO")
+        ok, _ = run_cmd("mount")
+        results["mount"] = ok
+        if not ok:
+            log_test("Mount failed, aborting.", "FAIL")
+            return results
+
+        # Verify overlays report mounted
+        for path in self.config_paths.keys():
+            if check_overlay_mounted(path):
+                log_test(f"Overlay mounted: {path}", "SUCCESS")
+            else:
+                log_test(f"Overlay NOT mounted: {path}", "FAIL")
+                results["mount"] = False
+
+        # Create files inside overlays
+        log_test("\n>>> Test 2: create files", "INFO")
+        self.create_test_files(tag="t1")
+        time.sleep(1)
+        results["file_creation"] = self.verify_files(tag="t1", should_exist=True)
+        log_test("File creation/verify: " + ("OK" if results["file_creation"] else "FAIL"),
+                 "SUCCESS" if results["file_creation"] else "FAIL")
+
+        # Flush
+        log_test("\n>>> Test 3: flush", "INFO")
+        ok, _ = run_cmd("flush")
+        results["flush"] = ok
+        if not ok:
+            log_test("Flush failed.", "FAIL")
+        else:
+            # After flush, files should still be visible in merged view for modes flush/persist/writeback
+            # (Drop paths may also still show them if they were created in upper and not cleared by policy yet.)
+            still_ok = self.verify_files(tag="t1", should_exist=True)
+            results["flush"] = results["flush"] and still_ok
+            log_test("Flush verify: " + ("OK" if still_ok else "FAIL"),
+                     "SUCCESS" if still_ok else "FAIL")
+
+        # Delete files (whiteout behavior)
+        log_test("\n>>> Test 4: delete files", "INFO")
+        self.delete_test_files(tag="t1")
+        time.sleep(1)
+        results["deletion"] = self.verify_files(tag="t1", should_exist=False)
+        log_test("Deletion verify: " + ("OK" if results["deletion"] else "FAIL"),
+                 "SUCCESS" if results["deletion"] else "FAIL")
+
+        # Create more files, then unmount
+        log_test("\n>>> Prepare for unmount: create more files", "INFO")
+        self.create_test_files(tag="t2")
+        time.sleep(1)
+
+        log_test("\n>>> Test 5: unmount", "INFO")
+        ok, _ = run_cmd("unmount")
+        results["unmount"] = ok
+        if not ok:
+            log_test("Unmount failed.", "FAIL")
+        else:
+            # After unmount, check per-policy expectations
+            persisted_ok = self.verify_persistence_per_policy(tag="t2")
+            results["persistence"] = persisted_ok
+            log_test("Persistence after unmount (per policy): " + ("OK" if persisted_ok else "FAIL"),
+                     "SUCCESS" if persisted_ok else "FAIL")
+
+        log_test("\n>>> Cleanup", "INFO")
+        self.delete_test_files(tag="t1")
+        self.delete_test_files(tag="t2")
+
+        # Final remount (sanity)
+        log_test("\n>>> Remount sanity", "INFO")
+        run_cmd("mount")
+
+        # Summary
+        log_test("\n===== TEST SUMMARY =====", "INFO")
+        all_ok = True
+        for k, v in results.items():
+            all_ok &= v
+            log_test(f"{k.ljust(15)}: " + ("PASSED" if v else "FAILED"),
+                     "SUCCESS" if v else "FAIL")
+
+        return results
+
+# -------- Main --------
+def main():
+    print(colored("=" * 60, Colors.BOLD))
+    print(colored("OMV-WRITECACHE TEST (REAL CONFIG)", Colors.BOLD))
+    print(colored("=" * 60, Colors.BOLD))
+
+    require_root()
+    ensure_script()
+
+    # Load config once early to fail fast if malformed
+    try:
+        cfg_paths = load_real_config_paths()
+        log_test(f"Loaded {len(cfg_paths)} configured paths from {CONFIG_PATH}", "INFO")
+        for p, m in cfg_paths.items():
+            log_test(f"  {p} = {m}", "DEBUG")
+    except Exception as e:
+        log_test(f"Error reading real config: {e}", "FAIL")
+        sys.exit(1)
+
+    tester = WriteCacheRealTest()
+    try:
+        results = tester.run()
+        results_file = Path("/tmp/omv-writecache-test-results.json")
+        with open(results_file, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"\nResults saved to: {results_file}")
+        sys.exit(0 if all(results.values()) else 1)
+    except KeyboardInterrupt:
+        print(colored("\nInterrupted", Colors.YELLOW))
+        sys.exit(130)
+    except Exception as e:
+        print(colored(f"\nTest failed: {e}", Colors.RED))
+        import traceback; traceback.print_exc()
+        sys.exit(1)
+    finally:
+        # Let the main tool manage cleanup/unmounts; we just log.
+        log_test("Test complete.", "INFO")
+        print(f"\nTest log saved to: {TEST_LOG}")
+
+if __name__ == "__main__":
+    try:
+        os.chdir("/")
+    except Exception:
+        pass
+
+    main()
