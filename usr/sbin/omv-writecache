@@ -453,7 +453,7 @@ def flush(cfg):
             log(f"FLUSH_FAILED: {p}", "ERROR")
 
         # Remount overlay (always) so merged view sees the new lower state
-        opts = f"lowerdir={lower},upperdir={upper},workdir={work},metacopy=off,redirect_dir=off"
+        opts = f"lowerdir={lower},upperdir={upper},workdir={work},metacopy=off,redirect_dir=off,index=off"
         log(f"POST-FLUSH_MOUNT: {p} lowerdir={lower}")
         run(["mount", "-t", "overlay", "overlay", "-o", opts, str(p)], check=False)
 
