@@ -6,7 +6,7 @@
 # License version 2. This program is licensed "as is" without any
 # warranty of any kind, whether express or implied.
 #
-# version: 0.0.2
+# version: 0.0.3
 #
 import os, sys, subprocess, time, re, shutil
 import atexit, signal
@@ -88,6 +88,39 @@ def is_mountpoint(path: Path) -> bool:
                     return True
     except Exception:
         pass
+    return False
+
+def wait_for_unmount(path: Path, timeout: int = 10) -> bool:
+    """Wait for a path to be unmounted, with timeout"""
+    for _ in range(timeout * 2):
+        if not is_mountpoint(path) and not is_overlay_mounted(path):
+            return True
+        time.sleep(0.5)
+    return False
+
+def force_unmount_with_retry(path: Path, max_retries: int = 3) -> bool:
+    """Forcefully unmount a path with retries and fuser killing if needed"""
+    for attempt in range(max_retries):
+        if not is_mountpoint(path) and not is_overlay_mounted(path):
+            return True
+
+        # Try lazy unmount first
+        result = run(["umount", "-l", str(path)], check=False)
+        if result.returncode == 0:
+            if wait_for_unmount(path, 5):
+                return True
+
+        # If that fails, try to kill processes using the mountpoint
+        if attempt < max_retries - 1:  # Don't do this on the last attempt
+            log(f"FORCE_UNMOUNT_RETRY {attempt + 1}: Killing processes using {path}")
+            run(["fuser", "-km", str(path)], check=False)
+
+            # Try regular unmount after killing processes
+            result = run(["umount", str(path)], check=False)
+            if result.returncode == 0:
+                if wait_for_unmount(path, 5):
+                    return True
+
     return False
 
 def ensure_lower_bind(real_path: Path, name: str) -> Path:
@@ -227,7 +260,7 @@ def clear_overlay_opq_and_whiteouts(upper_dir: Path) -> int:
         try:
             import os
             os.setxattr(str(upper_dir), b"trusted.overlay.opaque", b"")
-            # if above doesn’t clear on your Python, fallback to setfattr via run()
+            # if above doesn't clear on your Python, fallback to setfattr via run()
         except Exception:
             run(["setfattr", "-x", "trusted.overlay.opaque", str(upper_dir)], check=False)
 
@@ -272,7 +305,7 @@ def mount_overlays(cfg):
         # If something mounted overlay on the lower bind path, tear it down
         if is_overlay_mounted(lower):
             log(f"FIXUP: overlay was mounted on lower bind {lower}; unmounting", "ERROR")
-            run(["umount", "-l", str(lower)], check=False)
+            force_unmount_with_retry(lower)
         opts = f"lowerdir={lower},upperdir={upper},workdir={work},metacopy=off,redirect_dir=off,index=off"
         log(f"OVERLAY_MOUNT: {p} policy={mode} lowerdir={lower}")
         res = run(["mount", "-t", "overlay", "overlay", "-o", opts, str(p)], check=False)
@@ -406,7 +439,10 @@ def flush(cfg):
         # Unmount overlay so lower changes are seen on remount
         if is_overlay_mounted(p):
             log(f"PRE-FLUSH_UNMOUNT: {p}")
-            run(["umount", "-l", str(p)], check=False)
+            if not force_unmount_with_retry(p):
+                log(f"PRE-FLUSH_UNMOUNT_FAILED: {p}", "ERROR")
+                errors += 1
+                continue
 
         ok = False
         try:
@@ -452,10 +488,31 @@ def flush(cfg):
         else:
             log(f"FLUSH_FAILED: {p}", "ERROR")
 
+        # Completely recreate both upper and work directories to avoid reuse conflicts
+        try:
+            # Remove and recreate upper directory
+            if upper.exists():
+                shutil.rmtree(upper, ignore_errors=True)
+            upper.mkdir(parents=True, exist_ok=True)
+            log(f"RECREATED_UPPERDIR: {upper}")
+
+            # Remove and recreate work directory
+            if work.exists():
+                shutil.rmtree(work, ignore_errors=True)
+            work.mkdir(parents=True, exist_ok=True)
+            log(f"RECREATED_WORKDIR: {work}")
+        except Exception as e:
+            log(f"DIR_RECREATE_FAILED: {e}", "ERROR")
+            errors += 1
+
         # Remount overlay (always) so merged view sees the new lower state
         opts = f"lowerdir={lower},upperdir={upper},workdir={work},metacopy=off,redirect_dir=off,index=off"
         log(f"POST-FLUSH_MOUNT: {p} lowerdir={lower}")
-        run(["mount", "-t", "overlay", "overlay", "-o", opts, str(p)], check=False)
+        mount_result = run(["mount", "-t", "overlay", "overlay", "-o", opts, str(p)], check=False)
+
+        if mount_result.returncode != 0:
+            log(f"POST-FLUSH_MOUNT_FAILED: {p} - exit {mount_result.returncode}", "ERROR")
+            errors += 1
 
     log("FLUSH_COMPLETE: Success" if errors == 0 else f"FLUSH_COMPLETE: {errors} errors",
         "ERROR" if errors else "INFO")
@@ -470,7 +527,7 @@ def unmount(cfg):
         lower = lower_bind_for(name)
         if is_overlay_mounted(lower):
             log(f"LOWER_OVERLAY_UNMOUNT: {lower}")
-            run(["umount", "-l", str(lower)], check=False)
+            force_unmount_with_retry(lower)
 
     # 2) unmount main overlays deepest-first
     paths = [Path(p).resolve() for p, _ in items]
@@ -479,19 +536,19 @@ def unmount(cfg):
         lower = lower_bind_for(name)
         if is_overlay_mounted(p):
             log(f"UNMOUNT: {p}")
-            run(["umount", "-l", str(p)], check=False)
+            force_unmount_with_retry(p)
         else:
             log(f"NOT_MOUNTED: {p}", "DEBUG")
         if is_mountpoint(lower):
             log(f"LOWER_UNMOUNT: {lower}")
-            run(["umount", "-l", str(lower)], check=False)
+            force_unmount_with_retry(lower)
 
     # 3) drop tmpfs if nothing is using it
     with open("/proc/mounts") as f:
         mounts = f.read()
     if f" {TMPFS_MOUNT} tmpfs " in mounts:
         log(f"TMPFS_UNMOUNT: {TMPFS_MOUNT}")
-        run(["umount", "-l", str(TMPFS_MOUNT)], check=False)
+        force_unmount_with_retry(TMPFS_MOUNT)
     else:
         log(f"TMPFS_NOT_MOUNTED: {TMPFS_MOUNT}", "DEBUG")
     log("UNMOUNT_COMPLETE: Finished")
