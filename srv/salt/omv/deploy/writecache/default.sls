@@ -83,21 +83,20 @@ omv-writecache-setup_service:
         [Unit]
         Description=OMV WriteCache: mount overlays (tmpfs upper) for selected paths
         DefaultDependencies=no
-        After=local-fs-pre.target
-        After=blk-availability.service
+        After=local-fs-pre.target local-fs.target systemd-tmpfiles-setup.service
         RequiresMountsFor=/var
-        Wants=tmp.mount
-        Before=multi-user.target shutdown.target
-        Before=rrdcached.service nginx.service nmbd.service postfix@-.service
-        
+        Wants=tmp.mount local-fs.target
+        Before=multi-user.target shutdown.target postfix@-.service
+        Before=systemd-journald.socket systemd-journald.service rsyslog.service
+
         [Service]
         Type=oneshot
         ExecStart=/usr/sbin/omv-writecache mount
         ExecStop=/usr/sbin/omv-writecache unmount
         RemainAfterExit=yes
-        
+
         [Install]
-        WantedBy=multi-user.target
+        WantedBy=local-fs.target
     - user: root
     - group: root
     - mode: 0644
