@@ -86,8 +86,8 @@ omv-writecache-setup_service:
         After=local-fs-pre.target local-fs.target systemd-tmpfiles-setup.service
         RequiresMountsFor=/var
         Wants=tmp.mount local-fs.target
+        Before=systemd-journald.socket systemd-journald.service systemd-journald-dev-log.socket systemd-journald-audit.socket
         Before=multi-user.target shutdown.target postfix@-.service
-        Before=systemd-journald.socket systemd-journald.service rsyslog.service
 
         [Service]
         Type=oneshot
@@ -108,19 +108,23 @@ omv-writecache-flush_service:
         [Unit]
         Description=OMV WriteCache: flush overlay changes to disk
         DefaultDependencies=no
-        Before=umount.target blk-availability.service
+        Before=umount.target systemd-journal-flush.service
         Wants=umount.target
+        Conflicts=umount.target
         
         [Service]
         Type=oneshot
+{%- if config.rotate_on_shutdown | to_bool %}
+        ExecStartPre=/bin/journalctl --rotate
+        ExecStartPre=/bin/journalctl --sync
+{%- endif %}
         ExecStart=/usr/sbin/omv-writecache flush
         
         [Install]
-        WantedBy=multi-user.target
+        WantedBy=umount.target
     - user: root
     - group: root
     - mode: 0644
-
 
 writecache_systemctl_daemon_reload:
   module.run:

@@ -29,10 +29,23 @@ data:
             - ["auto", _("auto")]
             - ["volatile", _("volatile (RAM)")]
             - ["persistent", _("persistent (disk)")]
-      - type: checkbox
-        name: flush_on_shutdown
-        label: _("Flush on shutdown")
-        value: true
+      - type: container
+        fields:
+          - type: checkbox
+            name: flush_on_shutdown
+            label: _("Flush on shutdown")
+            value: true
+          - type: checkbox
+            name: rotate_on_shutdown
+            label: _("Rotate on shutdown")
+            value: true
+            hint: _("Run journalctl rotate and sync before flush")
+            modifiers:
+              - type: visible
+                constraint:
+                  operator: truthy
+                  arg0:
+                    prop: flush_on_shutdown
       - type: checkbox
         name: flush_daily
         label: _("Flush daily")

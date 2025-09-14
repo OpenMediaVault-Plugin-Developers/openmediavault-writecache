@@ -28,6 +28,10 @@
       "type": "boolean",
       "default": true
     },
+    "rotate_on_shutdown": {
+      "type": "boolean",
+      "default": true
+    },
     "flush_daily": {
       "type": "boolean",
       "default": false

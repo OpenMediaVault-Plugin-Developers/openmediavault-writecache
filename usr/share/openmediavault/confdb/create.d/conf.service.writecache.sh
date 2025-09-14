@@ -13,6 +13,7 @@ if ! omv_config_exists "${xpath}"; then
   omv_config_add_key "${xpath}" "tmpfs_size" "25%"
   omv_config_add_key "${xpath}" "journald_storage" "auto"
   omv_config_add_key "${xpath}" "flush_on_shutdown" "1"
+  omv_config_add_key "${xpath}" "rotate_on_shutdown" "1"
   omv_config_add_key "${xpath}" "flush_daily" "0"
   omv_config_add_key "${xpath}" "paths" \
 "/var/cache/apt/archives = drop
@@ -24,6 +25,10 @@ if ! omv_config_exists "${xpath}"; then
 /var/lib/monit = flush
 /var/log = flush
 /var/tmp = drop"
+fi
+
+if ! omv_config_exists "${xpath}/rotate_on_shutdown"; then
+  omv_config_add_key "${xpath}" "rotate_on_shutdown" "1"
 fi
 
 exit 0
