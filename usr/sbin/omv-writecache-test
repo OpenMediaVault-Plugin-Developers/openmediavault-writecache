@@ -6,7 +6,7 @@
 # License version 2. This program is licensed "as is" without any
 # warranty of any kind, whether express or implied.
 #
-# version: 0.0.1
+# version: 0.0.2
 #
 # Test script for omv-writecache
 # Uses the REAL config at /etc/omv-writecache/config.yaml and tests
@@ -47,6 +47,22 @@ def colored(text: str, color: str) -> str:
     if sys.stdout.isatty():
         return f"{color}{text}{Colors.RESET}"
     return text
+
+def run_sh(cmd, timeout: int = 20):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+        return (r.returncode == 0, r.stdout, r.stderr)
+    except Exception as e:
+        return (False, "", str(e))
+
+def journal_has(tag: str, needle: str, since_epoch: float | None = None, until_epoch: float | None = None) -> bool:
+    args = ["journalctl", "-b", "-t", tag, "--no-pager"]
+    if since_epoch is not None:
+        args += ["--since", f"@{since_epoch:.3f}"]
+    if until_epoch is not None:
+        args += ["--until", f"@{until_epoch:.3f}"]
+    ok, out, _ = run_sh(args, timeout=30)
+    return ok and (needle in out)
 
 def log_test(msg: str, level: str = "INFO"):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -107,23 +123,6 @@ def ensure_script():
         print(colored(f"Script not found at {SCRIPT_PATH}. Edit SCRIPT_PATH in this test.", Colors.RED))
         sys.exit(1)
     os.chmod(SCRIPT_PATH, 0o755)
-
-def run_cmd2(cmd: str) -> Tuple[bool, str]:
-    full_cmd = [SCRIPT_PATH, cmd]
-    log_test(f"Running: {' '.join(full_cmd)}", "DEBUG")
-    try:
-        res = subprocess.run(full_cmd, cwd="/", capture_output=True, text=True, timeout=60)
-        out = res.stdout + res.stderr
-        if res.returncode != 0:
-            log_test(f"Command failed ({cmd}): {out}", "WARN")
-            return False, out
-        return True, out
-    except subprocess.TimeoutExpired:
-        log_test(f"Command timed out: {cmd}", "FAIL")
-        return False, "Timeout"
-    except Exception as e:
-        log_test(f"Command error: {e}", "FAIL")
-        return False, str(e)
 
 def run_cmd(cmd: str) -> Tuple[bool, str]:
     """
@@ -327,6 +326,7 @@ class WriteCacheRealTest:
             "deletion": False,
             "unmount": False,
             "persistence": False,
+            "journald": False,
         }
 
         # Mount
@@ -353,8 +353,12 @@ class WriteCacheRealTest:
         log_test("File creation/verify: " + ("OK" if results["file_creation"] else "FAIL"),
                  "SUCCESS" if results["file_creation"] else "FAIL")
 
+        # >>> Journald and rsyslog tests
+        log_test("\n>>> Test 3: journald receive", "INFO")
+        results["journald"] = test_journald_receive()
+
         # Flush
-        log_test("\n>>> Test 3: flush", "INFO")
+        log_test("\n>>> Test 4: flush", "INFO")
         ok, _ = run_cmd("flush")
         results["flush"] = ok
         if not ok:
@@ -368,7 +372,7 @@ class WriteCacheRealTest:
                      "SUCCESS" if still_ok else "FAIL")
 
         # Delete files (whiteout behavior)
-        log_test("\n>>> Test 4: delete files", "INFO")
+        log_test("\n>>> Test 5: delete files", "INFO")
         self.delete_test_files(tag="t1")
         time.sleep(1)
         results["deletion"] = self.verify_files(tag="t1", should_exist=False)
@@ -380,7 +384,7 @@ class WriteCacheRealTest:
         self.create_test_files(tag="t2")
         time.sleep(1)
 
-        log_test("\n>>> Test 5: unmount", "INFO")
+        log_test("\n>>> Test 6: unmount", "INFO")
         ok, _ = run_cmd("unmount")
         results["unmount"] = ok
         if not ok:
@@ -410,7 +414,23 @@ class WriteCacheRealTest:
 
         return results
 
+def test_journald_receive() -> bool:
+    import time, shutil
+    tag = "wc_journald_test"
+    msg = f"journald test @{int(time.time())}"
+    # If systemd-cat is missing, fall back to logger only
+    has_systemd_cat = shutil.which("systemd-cat") is not None
+    run_sh(["logger", "-t", tag, msg], timeout=10)
+    if has_systemd_cat:
+        run_sh(["/bin/sh", "-lc", f'echo "{msg}" | systemd-cat -t {tag}'], timeout=10)
+    time.sleep(0.5)
+    ok = journal_has(tag, "journald test", since_epoch=time.time()-120)
+    log_test(f"journald receive {'OK' if ok else 'FAIL'} (tag={tag})", "SUCCESS" if ok else "FAIL")
+    return ok
+
+
 # -------- Main --------
+
 def main():
     print(colored("=" * 60, Colors.BOLD))
     print(colored("OMV-WRITECACHE TEST (REAL CONFIG)", Colors.BOLD))
