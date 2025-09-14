@@ -8,7 +8,7 @@ Homepage: https://github.com/OpenMediaVault-Plugin-Developers
 
 Package: openmediavault-writecache
 Architecture: all
-Depends: openmediavault (>= 7.7.14),
+Depends: openmediavault (>= 7.7.17),
          jq,
          ${misc:Depends}
 Description: openmediavault plugin to reduce OS writes using tmpfs+overlayfs
