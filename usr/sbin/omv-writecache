@@ -9,6 +9,7 @@
 # version: 0.0.3
 #
 import os, sys, subprocess, time, re, shutil
+import pwd, grp
 import atexit, signal
 from pathlib import Path
 
@@ -151,6 +152,29 @@ def run(cmd, check=True):
         if res.stdout.strip():
             log(f"OUTPUT: {res.stdout.strip()}", "DEBUG")
     return res
+
+def ensure_persistent_journal():
+    conf_path = "/etc/systemd/journald.conf.d/10-writecache.conf"
+    journal_dir = "/var/log/journal"
+
+    # Check if Storage=persistent is set
+    if os.path.exists(conf_path):
+        with open(conf_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line.lower().startswith("storage=") and line.split("=", 1)[1].strip().lower() == "persistent":
+                    # Ensure directory exists
+                    if not os.path.isdir(journal_dir):
+                        log(f"JRNDIR: {journal_dir} not found. Creating", "DEBUG")
+                        os.makedirs(journal_dir, exist_ok=True)
+                        # Set owner to root:systemd-journal and permissions to 2755
+                        try:
+                            gid = grp.getgrnam("systemd-journal").gr_gid
+                        except KeyError:
+                            gid = 0  # fallback to root if group missing
+                        os.chown(journal_dir, 0, gid)
+                        os.chmod(journal_dir, 0o2755)
+                    break
 
 def load_config():
     defaults = {
@@ -586,6 +610,7 @@ def main():
 
     if cmd in ["mount","flush","unmount","remount"]:
         check_and_create_lock("omv-writecache")
+        ensure_persistent_journal()
 
     log(f"SCRIPT_START: omv-writecache {cmd}")
 
