@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: openmediavault-writecache\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-08-17 15:56-0500\n"
+"POT-Creation-Date: 2025-09-21 11:17-0500\n"
 "PO-Revision-Date: 2025-08-17 20:57+0000\n"
 "Language-Team: Ukrainian (https://app.transifex.com/openmediavault-plugin-developers/teams/1854/uk/)\n"
 "MIME-Version: 1.0\n"
@@ -17,7 +17,19 @@ msgstr ""
 "Language: uk\n"
 "Plural-Forms: nplurals=4; plural=(n % 1 == 0 && n % 10 == 1 && n % 100 != 11 ? 0 : n % 1 == 0 && n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 1 : n % 1 == 0 && (n % 10 ==0 || (n % 10 >=5 && n % 10 <=9) || (n % 100 >=11 && n % 100 <=14 )) ? 2: 3);\n"
 
+msgid "Date & Time"
+msgstr ""
+
+msgid "Details"
+msgstr ""
+
 msgid "Enabled"
+msgstr ""
+
+msgid "Event"
+msgstr ""
+
+msgid "Flush"
 msgstr ""
 
 msgid "Flush daily"
@@ -29,15 +41,42 @@ msgstr ""
 msgid "Journal storage"
 msgstr ""
 
+msgid "Level"
+msgstr ""
+
 msgid "One entry per line <path> = drop|flush"
 msgstr ""
 
 msgid "Overlay paths and policy"
 msgstr ""
 
+msgid "Rotate & Flush"
+msgstr ""
+
+msgid "Rotate on daily flush"
+msgstr ""
+
+msgid "Rotate on shutdown"
+msgstr ""
+
+msgid "Run journalctl rotate and sync before flush"
+msgstr ""
+
+msgid "Running manual flush ..."
+msgstr ""
+
+msgid "Running manual rotate and flush ..."
+msgstr ""
+
+msgid "Running test ..."
+msgstr ""
+
 msgid ""
 "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, "
 "25%."
+msgstr ""
+
+msgid "Test"
 msgstr ""
 
 msgid "Will flush at 03:45 daily"

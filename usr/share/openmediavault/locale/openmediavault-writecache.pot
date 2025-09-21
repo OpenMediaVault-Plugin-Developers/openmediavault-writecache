@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: openmediavault-writecache\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-08-17 15:56-0500\n"
+"POT-Creation-Date: 2025-09-21 11:17-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -17,7 +17,19 @@ msgstr ""
 "Content-Type: text/plain; charset=CHARSET\n"
 "Content-Transfer-Encoding: 8bit\n"
 
+msgid "Date & Time"
+msgstr ""
+
+msgid "Details"
+msgstr ""
+
 msgid "Enabled"
+msgstr ""
+
+msgid "Event"
+msgstr ""
+
+msgid "Flush"
 msgstr ""
 
 msgid "Flush daily"
@@ -29,13 +41,40 @@ msgstr ""
 msgid "Journal storage"
 msgstr ""
 
+msgid "Level"
+msgstr ""
+
 msgid "One entry per line <path> = drop|flush"
 msgstr ""
 
 msgid "Overlay paths and policy"
 msgstr ""
 
+msgid "Rotate & Flush"
+msgstr ""
+
+msgid "Rotate on daily flush"
+msgstr ""
+
+msgid "Rotate on shutdown"
+msgstr ""
+
+msgid "Run journalctl rotate and sync before flush"
+msgstr ""
+
+msgid "Running manual flush ..."
+msgstr ""
+
+msgid "Running manual rotate and flush ..."
+msgstr ""
+
+msgid "Running test ..."
+msgstr ""
+
 msgid "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, 25%."
+msgstr ""
+
+msgid "Test"
 msgstr ""
 
 msgid "Will flush at 03:45 daily"
