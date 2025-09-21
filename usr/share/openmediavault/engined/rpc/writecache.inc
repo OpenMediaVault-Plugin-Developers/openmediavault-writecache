@@ -66,7 +66,8 @@ class OMVRpcServiceWriteCache extends \OMV\Rpc\ServiceAbstract
         // Create the background process.
         return $this->execBgProc(function($bgStatusFilename, $bgOutputFilename)
             use ($params) {
-                $cmd = new \OMV\System\Process('omv-writecache flush');
+                $arg = boolval($params['rotate']) ? 'rotateflush' : 'flush';
+                $cmd = new \OMV\System\Process('omv-writecache', $arg);
                 $cmd->setRedirect2to1();
                 $cmdLine = $cmd->getCommandLine();
                 if (0 !== $this->exec($cmdLine, $output, $bgOutputFilename)) {

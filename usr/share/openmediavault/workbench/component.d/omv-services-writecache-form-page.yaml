@@ -46,11 +46,24 @@ data:
                   operator: truthy
                   arg0:
                     prop: flush_on_shutdown
-      - type: checkbox
-        name: flush_daily
-        label: _("Flush daily")
-        hint: _("Will flush at 03:45 daily")
-        value: false
+      - type: container
+        fields:
+          - type: checkbox
+            name: flush_daily
+            label: _("Flush daily")
+            hint: _("Will flush at 03:45 daily")
+            value: false
+          - type: checkbox
+            name: rotate_on_daily_flush
+            label: _("Rotate on daily flush")
+            value: true
+            hint: _("Run journalctl rotate and sync before flush")
+            modifiers:
+              - type: visible
+                constraint:
+                  operator: truthy
+                  arg0:
+                    prop: flush_daily
       - type: textarea
         name: paths
         label: _("Overlay paths and policy")
@@ -73,6 +86,27 @@ data:
               request:
                 service: WriteCache
                 method: doFlush
+                params:
+                  rotate: false
+              buttons:
+                stop:
+                  hidden: true
+      - text: _("Rotate & Flush")
+        enabledConstraint:
+          operator: truthy
+          arg0:
+            prop: enable
+        execute:
+          type: taskDialog
+          taskDialog:
+            config:
+              title: _("Running manual rotate and flush ...")
+              startOnInit: true
+              request:
+                service: WriteCache
+                method: doFlush
+                params:
+                  rotate: true
               buttons:
                 stop:
                   hidden: true

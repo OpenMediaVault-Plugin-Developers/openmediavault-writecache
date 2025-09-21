@@ -36,6 +36,10 @@
       "type": "boolean",
       "default": false
     },
+    "rotate_on_daily_flush": {
+      "type": "boolean",
+      "default": true
+    },
     "paths": {
       "type": "string"
     }

@@ -115,10 +115,10 @@ omv-writecache-flush_service:
         [Service]
         Type=oneshot
 {%- if config.rotate_on_shutdown | to_bool %}
-        ExecStartPre=/bin/journalctl --rotate
-        ExecStartPre=/bin/journalctl --sync
-{%- endif %}
+        ExecStart=/usr/sbin/omv-writecache rotateflush
+{%- else %}
         ExecStart=/usr/sbin/omv-writecache flush
+{%- endif %}
         
         [Install]
         WantedBy=umount.target
@@ -178,7 +178,11 @@ omv_writecache_cron:
     - contents: |
         {{ pillar['headers']['auto_generated'] }}
         {{ pillar['headers']['warning'] }}
+{%- if config.rotate_on_daily_flush | to_bool %}
+        45 3 * * * root /usr/sbin/omv-writecache rotateflush >/dev/null 2>&1
+{%- else %}
         45 3 * * * root /usr/sbin/omv-writecache flush >/dev/null 2>&1
+{%- endif %}
 
 {% else %}
 

@@ -15,6 +15,7 @@ if ! omv_config_exists "${xpath}"; then
   omv_config_add_key "${xpath}" "flush_on_shutdown" "1"
   omv_config_add_key "${xpath}" "rotate_on_shutdown" "1"
   omv_config_add_key "${xpath}" "flush_daily" "0"
+  omv_config_add_key "${xpath}" "rotate_on_daily_flush" "1"
   omv_config_add_key "${xpath}" "paths" \
 "/var/cache/apt/archives = drop
 /var/cache/samba = drop
@@ -29,6 +30,9 @@ fi
 
 if ! omv_config_exists "${xpath}/rotate_on_shutdown"; then
   omv_config_add_key "${xpath}" "rotate_on_shutdown" "1"
+fi
+if ! omv_config_exists "${xpath}/rotate_on_daily_flush"; then
+  omv_config_add_key "${xpath}" "rotate_on_daily_flush" "1"
 fi
 
 exit 0
