@@ -6,7 +6,7 @@
 # License version 2. This program is licensed "as is" without any
 # warranty of any kind, whether express or implied.
 #
-# version: 0.0.3
+# version: 0.0.4
 #
 import os, sys, subprocess, time, re, shutil
 import pwd, grp
@@ -174,7 +174,27 @@ def ensure_persistent_journal():
                             gid = 0  # fallback to root if group missing
                         os.chown(journal_dir, 0, gid)
                         os.chmod(journal_dir, 0o2755)
+                        # ensure machine id subdirectory exists
+                        try:
+                            mid = pathlib.Path("/etc/machine-id").read_text().strip()
+                        except FileNotFoundError:
+                            mid = ""
+                        if mid:
+                            mid_dir = os.path.join(journal_dir, mid)
+                            if not os.path.isdir(journal_dir):
+                                log(f"MIDDIR: {mid_dir} not found. Creating", "DEBUG")
+                                os.makedirs(mid_dir, exist_ok=True)
+                            os.chown(journal_dir, 0, gid)
+                            os.chmod(journal_dir, 0o2755)
                     break
+
+def journalctl_rotate_sync():
+    log("ROTATE_START: Beginning journalctl rotate and sync operation")
+    try:
+        run(["journalctl", "--rotate"], check=False)
+        run(["journalctl", "--sync"], check=False)
+    except Exception as e:
+        log(f"journalctl rotate/sync failed: {e}", "WARN")
 
 def load_config():
     defaults = {
@@ -604,11 +624,11 @@ def main():
         print("This tool must be run as root", file=sys.stderr)
         sys.exit(1)
     if len(sys.argv) < 2:
-        print("Usage: omv-writecache [mount|flush|unmount|remount|status]")
+        print("Usage: omv-writecache [mount|rotateflush|flush|unmount|remount|status]")
         sys.exit(2)
     cmd = sys.argv[1]
 
-    if cmd in ["mount","flush","unmount","remount"]:
+    if cmd in ["mount","rotateflush","flush","unmount","remount"]:
         check_and_create_lock("omv-writecache")
         ensure_persistent_journal()
 
@@ -616,6 +636,9 @@ def main():
 
     if cmd == "mount":
         cmd_mount()
+    elif cmd == "rotateflush":
+        journalctl_rotate_sync()
+        cmd_flush()
     elif cmd == "flush":
         cmd_flush()
     elif cmd == "unmount":
@@ -652,7 +675,7 @@ def main():
 
     log(f"SCRIPT_END: omv-writecache {cmd}")
 
-    if cmd in ["mount","flush","unmount","remount"]:
+    if cmd in ["mount","rotateflush","flush","unmount","remount"]:
         # release lock
         release_lock()
 
