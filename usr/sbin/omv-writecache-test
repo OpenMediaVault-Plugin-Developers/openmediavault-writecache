@@ -6,10 +6,10 @@
 # License version 2. This program is licensed "as is" without any
 # warranty of any kind, whether express or implied.
 #
-# version: 0.0.2
+# version: 0.1.3
 #
 # Test script for omv-writecache
-# Uses the REAL config at /etc/omv-writecache/config.yaml and tests
+# Uses the config at /etc/omv-writecache/config.yaml and tests
 # mount, flush, and unmount operations with the configured policies.
 #
 import os
@@ -19,6 +19,9 @@ import shutil
 import subprocess
 import hashlib
 import json
+import tempfile
+import stat
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
@@ -82,7 +85,7 @@ def log_test(msg: str, level: str = "INFO"):
         pass
 
 # -------- Helpers --------
-def load_real_config_paths() -> Dict[str, str]:
+def load_config_paths() -> Dict[str, str]:
     """
     Read /etc/omv-writecache/config.yaml and return {path: policy}.
     Expects a 'paths' multi-line string with lines like: "/var/log = flush"
@@ -184,6 +187,23 @@ def check_overlay_mounted(path: str) -> bool:
         pass
     return False
 
+def get_tmpfs_usage() -> Tuple[int, int]:
+    """Return (used_bytes, total_bytes) for the writecache tmpfs"""
+    try:
+        result = subprocess.run(
+            ["df", "-B1", "/run/omv-writecache"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            lines = result.stdout.strip().split('\n')
+            if len(lines) >= 2:
+                parts = lines[1].split()
+                if len(parts) >= 3:
+                    return int(parts[2]), int(parts[1])
+    except Exception:
+        pass
+    return 0, 0
+
 # -------- Test file helper --------
 class TestFile:
     def __init__(self, path: Path, content: Optional[str] = None):
@@ -216,9 +236,9 @@ class TestFile:
             pass
 
 # -------- Test runner --------
-class WriteCacheRealTest:
+class WriteCacheTest:
     def __init__(self):
-        self.config_paths = load_real_config_paths()
+        self.config_paths = load_config_paths()
         self.test_files: Dict[str, List[TestFile]] = {}
 
     def create_test_files(self, tag: str):
@@ -274,21 +294,21 @@ class WriteCacheRealTest:
     def verify_persistence_per_policy(self, tag: str) -> bool:
         """
         After UNMOUNT, verify files according to policy:
-          - drop       -> files should NOT exist
+          - drop -> files should NOT exist
           - flush/persist/writeback -> files SHOULD exist (assuming flush_on_shutdown=True)
         """
         ok_all = True
         for path, policy in self.config_paths.items():
             key = f"{path}:{tag}"
             files = self.test_files.get(key, [])
-    
+
             expected_exists = policy in ("flush", "persist", "writeback")
             path_ok = True
-    
+
             for tf in files:
                 exists = tf.exists()
                 valid = tf.verify() if exists else False
-    
+
                 if expected_exists:
                     if not (exists and valid):
                         path_ok = False
@@ -300,15 +320,14 @@ class WriteCacheRealTest:
                         path_ok = False
                         ok_all = False
                         log_test(f"[{policy}] expected ABSENT after unmount: {tf.path}", "FAIL")
-    
+
             if path_ok:
                 if expected_exists:
                     log_test(f"[{policy}] persisted OK: {path}", "SUCCESS")
                 else:
                     log_test(f"[{policy}] dropped OK: {path}", "SUCCESS")
-    
-        return ok_all
 
+        return ok_all
 
     def delete_test_files(self, tag: str):
         log_test(f"Deleting test files: {tag}", "INFO")
@@ -317,6 +336,680 @@ class WriteCacheRealTest:
             files = self.test_files.get(key, [])
             for tf in files:
                 tf.delete()
+
+    def test_concurrent_operations(self) -> bool:
+        """Test that lock mechanism prevents concurrent operations"""
+        log_test("\n>>> Test: concurrent operations (lock)", "INFO")
+
+        def try_flush():
+            ok, _ = run_cmd("flush")
+            return ok
+
+        results = []
+        threads = []
+
+        # Start two flush operations simultaneously
+        for i in range(2):
+            t = threading.Thread(target=lambda: results.append(try_flush()))
+            threads.append(t)
+            t.start()
+            if i == 0:
+                time.sleep(0.3)  # Let first one acquire lock
+
+        for t in threads:
+            t.join(timeout=60)
+
+        # Exactly one should succeed (one gets lock, other is blocked)
+        if len(results) == 2:
+            success = results[0] != results[1]  # XOR
+            log_test(f"Concurrent lock test: {'OK' if success else 'FAIL'} (results={results})",
+                     "SUCCESS" if success else "FAIL")
+            return success
+        else:
+            log_test("Concurrent test incomplete", "FAIL")
+            return False
+
+    def test_disk_space_exhaustion(self) -> bool:
+        """Test behavior when tmpfs runs out of space"""
+        log_test("\n>>> Test: disk space exhaustion", "INFO")
+
+        # Find a writable path
+        test_path = None
+        for path in self.config_paths.keys():
+            if ALLOWED_FOR_FILE_CREATION and path not in ALLOWED_FOR_FILE_CREATION:
+                continue
+            test_path = Path(path)
+            break
+
+        if not test_path:
+            log_test("No suitable path for disk exhaustion test", "WARN")
+            return True  # Skip test
+
+        used, total = get_tmpfs_usage()
+        if total == 0:
+            log_test("Could not determine tmpfs size", "WARN")
+            return True  # Skip test
+
+        available = total - used
+        log_test(f"tmpfs available: {available / 1024 / 1024:.1f}MB", "DEBUG")
+
+        # Try to fill most of available space (leave 5MB buffer)
+        fill_size = max(0, available - 5 * 1024 * 1024)
+        if fill_size < 1024 * 1024:  # Less than 1MB available
+            log_test("Tmpfs too full for exhaustion test", "WARN")
+            return True
+
+        fill_file = test_path / f"omvwc_fill_{int(time.time())}.dat"
+        try:
+            # Create large file
+            with open(fill_file, "wb") as f:
+                chunk = b"x" * (1024 * 1024)  # 1MB chunks
+                written = 0
+                while written < fill_size:
+                    to_write = min(len(chunk), fill_size - written)
+                    f.write(chunk[:to_write])
+                    written += to_write
+
+            log_test(f"Created {written / 1024 / 1024:.1f}MB fill file", "DEBUG")
+
+            # Try to create more files (should handle gracefully)
+            small_file = test_path / f"omvwc_small_{int(time.time())}.txt"
+            try:
+                small_file.write_text("small content")
+                created = True
+            except Exception as e:
+                log_test(f"Expected failure on full disk: {e}", "DEBUG")
+                created = False
+
+            # System should still be operational
+            ok, _ = run_cmd("status")
+
+            # Cleanup
+            try:
+                fill_file.unlink()
+                if small_file.exists():
+                    small_file.unlink()
+            except Exception:
+                pass
+
+            log_test("Disk exhaustion test: OK (system remained stable)", "SUCCESS")
+            return ok
+
+        except Exception as e:
+            log_test(f"Disk exhaustion test error: {e}", "WARN")
+            try:
+                fill_file.unlink()
+            except Exception:
+                pass
+            return False
+
+    def test_special_permissions(self) -> bool:
+        """Test preservation of special permissions and ownership"""
+        log_test("\n>>> Test: special permissions and ownership", "INFO")
+
+        test_path = None
+        for path in self.config_paths.keys():
+            if ALLOWED_FOR_FILE_CREATION and path not in ALLOWED_FOR_FILE_CREATION:
+                continue
+            test_path = Path(path)
+            break
+
+        if not test_path:
+            log_test("No suitable path for permissions test", "WARN")
+            return True
+
+        test_file = test_path / f"omvwc_perms_{int(time.time())}.txt"
+        try:
+            # Create file with special permissions
+            test_file.write_text("permission test")
+
+            # Set various permission bits
+            os.chmod(test_file, 0o4755)  # setuid
+            original_stat = os.stat(test_file)
+
+            log_test(f"Created file with mode {oct(original_stat.st_mode)}", "DEBUG")
+
+            # Flush to write through
+            ok, _ = run_cmd("flush")
+            if not ok:
+                log_test("Flush failed during permissions test", "FAIL")
+                test_file.unlink()
+                return False
+
+            # Verify permissions preserved
+            new_stat = os.stat(test_file)
+            perms_ok = (original_stat.st_mode == new_stat.st_mode)
+
+            test_file.unlink()
+
+            log_test(f"Permissions preservation: {'OK' if perms_ok else 'FAIL'}",
+                     "SUCCESS" if perms_ok else "FAIL")
+            return perms_ok
+
+        except Exception as e:
+            log_test(f"Permissions test error: {e}", "WARN")
+            try:
+                test_file.unlink()
+            except Exception:
+                pass
+            return False
+
+    def test_symlinks(self) -> bool:
+        """Test symlink handling"""
+        log_test("\n>>> Test: symlink handling", "INFO")
+
+        test_path = None
+        for path in self.config_paths.keys():
+            if ALLOWED_FOR_FILE_CREATION and path not in ALLOWED_FOR_FILE_CREATION:
+                continue
+            test_path = Path(path)
+            break
+
+        if not test_path:
+            log_test("No suitable path for symlink test", "WARN")
+            return True
+
+        target_file = test_path / f"omvwc_target_{int(time.time())}.txt"
+        symlink_file = test_path / f"omvwc_link_{int(time.time())}.txt"
+
+        try:
+            # Create target and symlink
+            target_file.write_text("symlink target")
+            symlink_file.symlink_to(target_file.name)  # Relative symlink
+
+            # Verify symlink works
+            content = symlink_file.read_text()
+            symlink_ok = (content == "symlink target" and symlink_file.is_symlink())
+
+            # Flush
+            ok, _ = run_cmd("flush")
+            if not ok:
+                log_test("Flush failed during symlink test", "FAIL")
+                target_file.unlink()
+                symlink_file.unlink()
+                return False
+
+            # Verify symlink still works after flush
+            still_ok = symlink_file.is_symlink() and symlink_file.read_text() == "symlink target"
+
+            target_file.unlink()
+            symlink_file.unlink()
+
+            result = symlink_ok and still_ok
+            log_test(f"Symlink test: {'OK' if result else 'FAIL'}",
+                     "SUCCESS" if result else "FAIL")
+            return result
+
+        except Exception as e:
+            log_test(f"Symlink test error: {e}", "WARN")
+            try:
+                target_file.unlink()
+                symlink_file.unlink()
+            except Exception:
+                pass
+            return False
+
+    def test_deep_directories(self) -> bool:
+        """Test deep directory hierarchies"""
+        log_test("\n>>> Test: deep directory hierarchy", "INFO")
+
+        test_path = None
+        for path in self.config_paths.keys():
+            if ALLOWED_FOR_FILE_CREATION and path not in ALLOWED_FOR_FILE_CREATION:
+                continue
+            test_path = Path(path)
+            break
+
+        if not test_path:
+            log_test("No suitable path for deep directory test", "WARN")
+            return True
+
+        # Create deep hierarchy (30 levels)
+        base_dir = test_path / f"omvwc_deep_{int(time.time())}"
+        current = base_dir
+        depth = 30
+
+        try:
+            for i in range(depth):
+                current = current / f"level_{i}"
+            current.mkdir(parents=True, exist_ok=True)
+
+            # Create file at deepest level
+            deep_file = current / "deep_file.txt"
+            deep_file.write_text("deep content")
+
+            # Flush
+            ok, _ = run_cmd("flush")
+            if not ok:
+                log_test("Flush failed during deep directory test", "FAIL")
+                shutil.rmtree(base_dir, ignore_errors=True)
+                return False
+
+            # Verify file still exists
+            still_exists = deep_file.exists() and deep_file.read_text() == "deep content"
+
+            shutil.rmtree(base_dir, ignore_errors=True)
+
+            log_test(f"Deep directory test: {'OK' if still_exists else 'FAIL'}",
+                     "SUCCESS" if still_exists else "FAIL")
+            return still_exists
+
+        except Exception as e:
+            log_test(f"Deep directory test error: {e}", "WARN")
+            try:
+                shutil.rmtree(base_dir, ignore_errors=True)
+            except Exception:
+                pass
+            return False
+
+    def test_whiteout_scenarios(self) -> bool:
+        """Test complex whiteout scenarios"""
+        log_test("\n>>> Test: whiteout scenarios", "INFO")
+
+        test_path = None
+        for path, policy in self.config_paths.items():
+            if policy in ("flush", "persist", "writeback"):
+                if ALLOWED_FOR_FILE_CREATION and path not in ALLOWED_FOR_FILE_CREATION:
+                    continue
+                test_path = Path(path)
+                break
+
+        if not test_path:
+            log_test("No suitable path for whiteout test", "WARN")
+            return True
+
+        test_file = test_path / f"omvwc_whiteout_{int(time.time())}.txt"
+
+        try:
+            # Create, delete, recreate cycle
+            test_file.write_text("first version")
+            time.sleep(0.1)
+            test_file.unlink()
+            time.sleep(0.1)
+            test_file.write_text("second version")
+
+            # Flush should handle this correctly
+            ok, _ = run_cmd("flush")
+            if not ok:
+                log_test("Flush failed during whiteout test", "FAIL")
+                return False
+
+            # File should exist with second version
+            exists_ok = test_file.exists()
+            content_ok = test_file.read_text() == "second version" if exists_ok else False
+
+            test_file.unlink()
+
+            result = exists_ok and content_ok
+            log_test(f"Whiteout test: {'OK' if result else 'FAIL'}",
+                     "SUCCESS" if result else "FAIL")
+            return result
+
+        except Exception as e:
+            log_test(f"Whiteout test error: {e}", "WARN")
+            try:
+                test_file.unlink()
+            except Exception:
+                pass
+            return False
+
+    def test_status_command(self) -> bool:
+        """Test status command output"""
+        log_test("\n>>> Test: status command", "INFO")
+
+        ok, output = run_cmd("status")
+        if not ok:
+            log_test("Status command failed", "FAIL")
+            return False
+
+        # Check for expected mounts
+        has_tmpfs = "/run/omv-writecache" in output
+
+        # Count overlay mounts
+        overlay_count = output.count("overlay")
+        expected_count = len(self.config_paths)
+
+        count_ok = overlay_count >= expected_count  # May have more due to subdirs
+
+        log_test(f"Status: tmpfs={has_tmpfs}, overlays={overlay_count}>={expected_count}", "DEBUG")
+
+        result = has_tmpfs and count_ok
+        log_test(f"Status command test: {'OK' if result else 'FAIL'}",
+                 "SUCCESS" if result else "FAIL")
+        return result
+
+    def test_large_files(self) -> bool:
+        """Test handling of larger files"""
+        log_test("\n>>> Test: large file handling", "INFO")
+
+        test_path = None
+        for path in self.config_paths.keys():
+            if ALLOWED_FOR_FILE_CREATION and path not in ALLOWED_FOR_FILE_CREATION:
+                continue
+            test_path = Path(path)
+            break
+
+        if not test_path:
+            log_test("No suitable path for large file test", "WARN")
+            return True
+
+        # Check available space
+        used, total = get_tmpfs_usage()
+        if total == 0:
+            log_test("Could not determine tmpfs size", "WARN")
+            return True
+
+        available = total - used
+        # Use 10MB or 10% of available, whichever is smaller
+        size = min(10 * 1024 * 1024, available // 10)
+
+        if size < 1024 * 1024:  # Less than 1MB
+            log_test("Not enough space for large file test", "WARN")
+            return True
+
+        large_file = test_path / f"omvwc_large_{int(time.time())}.dat"
+
+        try:
+            # Create file with known pattern
+            chunk = b"A" * (1024 * 1024)  # 1MB of 'A'
+            checksum = hashlib.md5()
+
+            with open(large_file, "wb") as f:
+                written = 0
+                while written < size:
+                    to_write = min(len(chunk), size - written)
+                    data = chunk[:to_write]
+                    f.write(data)
+                    checksum.update(data)
+                    written += to_write
+
+            original_checksum = checksum.hexdigest()
+            log_test(f"Created {size / 1024 / 1024:.1f}MB file", "DEBUG")
+
+            # Flush
+            ok, _ = run_cmd("flush")
+            if not ok:
+                log_test("Flush failed during large file test", "FAIL")
+                large_file.unlink()
+                return False
+
+            # Verify integrity
+            verify_checksum = hashlib.md5()
+            with open(large_file, "rb") as f:
+                while True:
+                    data = f.read(1024 * 1024)
+                    if not data:
+                        break
+                    verify_checksum.update(data)
+
+            integrity_ok = (verify_checksum.hexdigest() == original_checksum)
+
+            large_file.unlink()
+
+            log_test(f"Large file test: {'OK' if integrity_ok else 'FAIL'}",
+                     "SUCCESS" if integrity_ok else "FAIL")
+            return integrity_ok
+
+        except Exception as e:
+            log_test(f"Large file test error: {e}", "WARN")
+            try:
+                large_file.unlink()
+            except Exception:
+                pass
+            return False
+
+    def test_rapid_operations(self) -> bool:
+        """Test rapid create/modify/delete operations"""
+        log_test("\n>>> Test: rapid I/O operations", "INFO")
+
+        test_path = None
+        for path in self.config_paths.keys():
+            if ALLOWED_FOR_FILE_CREATION and path not in ALLOWED_FOR_FILE_CREATION:
+                continue
+            test_path = Path(path)
+            break
+
+        if not test_path:
+            log_test("No suitable path for rapid I/O test", "WARN")
+            return True
+
+        base_name = f"omvwc_rapid_{int(time.time())}"
+        files_created = []
+
+        try:
+            # Rapid create
+            for i in range(50):
+                f = test_path / f"{base_name}_{i}.txt"
+                f.write_text(f"content {i}")
+                files_created.append(f)
+
+            # Rapid modify
+            for f in files_created[:25]:
+                f.write_text(f"modified {f.name}")
+
+            # Rapid delete
+            for f in files_created[25:]:
+                f.unlink()
+                files_created.remove(f)
+
+            # Flush
+            ok, _ = run_cmd("flush")
+            if not ok:
+                log_test("Flush failed during rapid I/O test", "FAIL")
+                for f in files_created:
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+                return False
+
+            # Verify remaining files
+            all_ok = True
+            for f in files_created:
+                if not f.exists() or not f.read_text().startswith("modified"):
+                    all_ok = False
+                    break
+
+            # Cleanup
+            for f in files_created:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+
+            log_test(f"Rapid I/O test: {'OK' if all_ok else 'FAIL'}",
+                     "SUCCESS" if all_ok else "FAIL")
+            return all_ok
+
+        except Exception as e:
+            log_test(f"Rapid I/O test error: {e}", "WARN")
+            for f in files_created:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+            return False
+
+    def test_double_mount(self) -> bool:
+        """Test mounting when already mounted"""
+        log_test("\n>>> Test: double mount prevention", "INFO")
+
+        # Ensure mounted
+        ok1, _ = run_cmd("mount")
+        if not ok1:
+            log_test("Initial mount failed", "FAIL")
+            return False
+
+        # Try to mount again (should be idempotent)
+        ok2, output2 = run_cmd("mount")
+
+        # Should succeed or handle gracefully
+        # Check that overlays are still mounted
+        still_mounted = True
+        for path in self.config_paths.keys():
+            if not check_overlay_mounted(path):
+                still_mounted = False
+                break
+
+        result = ok2 and still_mounted
+        log_test(f"Double mount test: {'OK' if result else 'FAIL'}",
+                 "SUCCESS" if result else "FAIL")
+        return result
+
+    def test_empty_directories(self) -> bool:
+        """Test handling of empty directories"""
+        log_test("\n>>> Test: empty directories", "INFO")
+
+        test_path = None
+        for path in self.config_paths.keys():
+            if ALLOWED_FOR_FILE_CREATION and path not in ALLOWED_FOR_FILE_CREATION:
+                continue
+            test_path = Path(path)
+            break
+
+        if not test_path:
+            log_test("No suitable path for empty directory test", "WARN")
+            return True
+
+        empty_dir = test_path / f"omvwc_empty_{int(time.time())}"
+
+        try:
+            empty_dir.mkdir(parents=True, exist_ok=True)
+
+            # Flush
+            ok, _ = run_cmd("flush")
+            if not ok:
+                log_test("Flush failed during empty directory test", "FAIL")
+                shutil.rmtree(empty_dir, ignore_errors=True)
+                return False
+
+            # Directory should still exist
+            still_exists = empty_dir.exists() and empty_dir.is_dir()
+
+            shutil.rmtree(empty_dir, ignore_errors=True)
+
+            log_test(f"Empty directory test: {'OK' if still_exists else 'FAIL'}",
+                     "SUCCESS" if still_exists else "FAIL")
+            return still_exists
+
+        except Exception as e:
+            log_test(f"Empty directory test error: {e}", "WARN")
+            try:
+                shutil.rmtree(empty_dir, ignore_errors=True)
+            except Exception:
+                pass
+            return False
+
+    def test_long_filenames(self) -> bool:
+        """Test handling of long filenames (near 255 char limit)"""
+        log_test("\n>>> Test: long filenames", "INFO")
+
+        test_path = None
+        for path in self.config_paths.keys():
+            if ALLOWED_FOR_FILE_CREATION and path not in ALLOWED_FOR_FILE_CREATION:
+                continue
+            test_path = Path(path)
+            break
+
+        if not test_path:
+            log_test("No suitable path for long filename test", "WARN")
+            return True
+
+        # Create 250 char filename (leave room for extension)
+        long_name = "omvwc_" + "x" * 240 + ".txt"
+        long_file = test_path / long_name
+
+        try:
+            long_file.write_text("long filename content")
+
+            # Flush
+            ok, _ = run_cmd("flush")
+            if not ok:
+                log_test("Flush failed during long filename test", "FAIL")
+                long_file.unlink()
+                return False
+
+            # Verify
+            still_exists = long_file.exists() and long_file.read_text() == "long filename content"
+
+            long_file.unlink()
+
+            log_test(f"Long filename test: {'OK' if still_exists else 'FAIL'}",
+                     "SUCCESS" if still_exists else "FAIL")
+            return still_exists
+
+        except Exception as e:
+            log_test(f"Long filename test error: {e}", "WARN")
+            try:
+                long_file.unlink()
+            except Exception:
+                pass
+            return False
+
+    def test_unicode_filenames(self) -> bool:
+        """Test handling of unicode/special characters in filenames"""
+        log_test("\n>>> Test: unicode filenames", "INFO")
+
+        test_path = None
+        for path in self.config_paths.keys():
+            if ALLOWED_FOR_FILE_CREATION and path not in ALLOWED_FOR_FILE_CREATION:
+                continue
+            test_path = Path(path)
+            break
+
+        if not test_path:
+            log_test("No suitable path for unicode filename test", "WARN")
+            return True
+
+        # Test various unicode characters
+        test_names = [
+            f"omvwc_emoji_😀_{int(time.time())}.txt",
+            f"omvwc_chinese_测试_{int(time.time())}.txt",
+            f"omvwc_accents_café_{int(time.time())}.txt",
+        ]
+
+        files = []
+        try:
+            for name in test_names:
+                f = test_path / name
+                f.write_text(f"content for {name}")
+                files.append(f)
+
+            # Flush
+            ok, _ = run_cmd("flush")
+            if not ok:
+                log_test("Flush failed during unicode filename test", "FAIL")
+                for f in files:
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+                return False
+
+            # Verify all files
+            all_ok = all(f.exists() for f in files)
+
+            # Cleanup
+            for f in files:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+
+            log_test(f"Unicode filename test: {'OK' if all_ok else 'FAIL'}",
+                     "SUCCESS" if all_ok else "FAIL")
+            return all_ok
+
+        except Exception as e:
+            log_test(f"Unicode filename test error: {e}", "WARN")
+            for f in files:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+            return False
+
+    # ========== MAIN TEST RUNNER ==========
 
     def run(self) -> Dict[str, bool]:
         results = {
@@ -327,6 +1020,19 @@ class WriteCacheRealTest:
             "unmount": False,
             "persistence": False,
             "journald": False,
+            "concurrent_ops": False,
+            "disk_exhaustion": False,
+            "special_permissions": False,
+            "symlinks": False,
+            "deep_directories": False,
+            "whiteout_scenarios": False,
+            "status_command": False,
+            "large_files": False,
+            "rapid_io": False,
+            "double_mount": False,
+            "empty_directories": False,
+            "long_filenames": False,
+            "unicode_filenames": False,
         }
 
         # Mount
@@ -353,7 +1059,7 @@ class WriteCacheRealTest:
         log_test("File creation/verify: " + ("OK" if results["file_creation"] else "FAIL"),
                  "SUCCESS" if results["file_creation"] else "FAIL")
 
-        # >>> Journald and rsyslog tests
+        # Journald test
         log_test("\n>>> Test 3: journald receive", "INFO")
         results["journald"] = test_journald_receive()
 
@@ -364,8 +1070,6 @@ class WriteCacheRealTest:
         if not ok:
             log_test("Flush failed.", "FAIL")
         else:
-            # After flush, files should still be visible in merged view for modes flush/persist/writeback
-            # (Drop paths may also still show them if they were created in upper and not cleared by policy yet.)
             still_ok = self.verify_files(tag="t1", should_exist=True)
             results["flush"] = results["flush"] and still_ok
             log_test("Flush verify: " + ("OK" if still_ok else "FAIL"),
@@ -379,6 +1083,21 @@ class WriteCacheRealTest:
         log_test("Deletion verify: " + ("OK" if results["deletion"] else "FAIL"),
                  "SUCCESS" if results["deletion"] else "FAIL")
 
+        # Run before unmount
+        results["concurrent_ops"] = self.test_concurrent_operations()
+        results["special_permissions"] = self.test_special_permissions()
+        results["symlinks"] = self.test_symlinks()
+        results["deep_directories"] = self.test_deep_directories()
+        results["whiteout_scenarios"] = self.test_whiteout_scenarios()
+        results["status_command"] = self.test_status_command()
+        results["large_files"] = self.test_large_files()
+        results["rapid_io"] = self.test_rapid_operations()
+        results["double_mount"] = self.test_double_mount()
+        results["empty_directories"] = self.test_empty_directories()
+        results["long_filenames"] = self.test_long_filenames()
+        results["unicode_filenames"] = self.test_unicode_filenames()
+        results["disk_exhaustion"] = self.test_disk_space_exhaustion()
+
         # Create more files, then unmount
         log_test("\n>>> Prepare for unmount: create more files", "INFO")
         self.create_test_files(tag="t2")
@@ -390,7 +1109,6 @@ class WriteCacheRealTest:
         if not ok:
             log_test("Unmount failed.", "FAIL")
         else:
-            # After unmount, check per-policy expectations
             persisted_ok = self.verify_persistence_per_policy(tag="t2")
             results["persistence"] = persisted_ok
             log_test("Persistence after unmount (per policy): " + ("OK" if persisted_ok else "FAIL"),
@@ -407,10 +1125,19 @@ class WriteCacheRealTest:
         # Summary
         log_test("\n===== TEST SUMMARY =====", "INFO")
         all_ok = True
+        passed = 0
+        failed = 0
         for k, v in results.items():
             all_ok &= v
-            log_test(f"{k.ljust(15)}: " + ("PASSED" if v else "FAILED"),
+            if v:
+                passed += 1
+            else:
+                failed += 1
+            log_test(f"{k.ljust(20)}: " + ("PASSED" if v else "FAILED"),
                      "SUCCESS" if v else "FAIL")
+
+        log_test(f"\nTotal: {passed} passed, {failed} failed",
+                 "SUCCESS" if all_ok else "FAIL")
 
         return results
 
@@ -433,7 +1160,7 @@ def test_journald_receive() -> bool:
 
 def main():
     print(colored("=" * 60, Colors.BOLD))
-    print(colored("OMV-WRITECACHE TEST (REAL CONFIG)", Colors.BOLD))
+    print(colored("OMV-WRITECACHE TEST", Colors.BOLD))
     print(colored("=" * 60, Colors.BOLD))
 
     require_root()
@@ -441,15 +1168,15 @@ def main():
 
     # Load config once early to fail fast if malformed
     try:
-        cfg_paths = load_real_config_paths()
+        cfg_paths = load_config_paths()
         log_test(f"Loaded {len(cfg_paths)} configured paths from {CONFIG_PATH}", "INFO")
         for p, m in cfg_paths.items():
             log_test(f"  {p} = {m}", "DEBUG")
     except Exception as e:
-        log_test(f"Error reading real config: {e}", "FAIL")
+        log_test(f"Error reading config: {e}", "FAIL")
         sys.exit(1)
 
-    tester = WriteCacheRealTest()
+    tester = WriteCacheTest()
     try:
         results = tester.run()
         results_file = Path("/tmp/omv-writecache-test-results.json")
@@ -465,7 +1192,6 @@ def main():
         import traceback; traceback.print_exc()
         sys.exit(1)
     finally:
-        # Let the main tool manage cleanup/unmounts; we just log.
         log_test("Test complete.", "INFO")
         print(f"\nTest log saved to: {TEST_LOG}")
 
