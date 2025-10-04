@@ -11,6 +11,7 @@
 import os, sys, subprocess, time, re, shutil
 import pwd, grp
 import atexit, signal
+import fcntl
 from pathlib import Path
 
 try:
@@ -18,6 +19,7 @@ try:
 except Exception:
     yaml = None
 
+SCRIPT_VERSION = "0.0.4"
 CONFIG = Path("/etc/omv-writecache/config.yaml")
 TMPFS_MOUNT = Path("/run/omv-writecache")
 LOG_FILE = "/var/log/omv-writecache.log"
@@ -42,35 +44,59 @@ def get_lock_filename(lockname):
 def check_and_create_lock(lockname):
     global LOCK_FILE
     global ARRAY_LOCK
+    global _LOCK_FD
     LOCK_FILE = get_lock_filename(lockname)
     ARRAY_LOCK = lockname
 
-    if os.path.exists(LOCK_FILE):
-        with open(LOCK_FILE, 'r') as f:
-            existing_pid = f.read().strip()
-            if existing_pid and existing_pid.isdigit():
-                existing_pid = int(existing_pid)
-                if os.path.exists(f"/proc/{existing_pid}"):
-                    log(f"Instance with lock name {lockname} and PID {existing_pid} is already running!")
-                    sys.exit(1)
+    # Open (create if missing) and keep fd for the whole process
+    _LOCK_FD = os.open(LOCK_FILE, os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(_LOCK_FD, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        # Someone else holds it; read PID for diagnostics if possible
+        try:
+            with open(LOCK_FILE, "r") as f:
+                owner_pid = f.read().strip() or "unknown"
+        except Exception:
+            owner_pid = "unknown"
+        log(f"Instance with lock name {lockname} and PID {owner_pid} is already running!", "WARN")
+        sys.exit(1)
 
-    # Write current process PID to the lock file
-    with open(LOCK_FILE, 'w') as f:
-        f.write(str(os.getpid()))
+    # We own the lock now; write our PID
+    try:
+        os.ftruncate(_LOCK_FD, 0)
+        os.write(_LOCK_FD, str(os.getpid()).encode("ascii"))
+        os.fsync(_LOCK_FD)
+    except Exception:
+        pass
 
-    atexit.register(release_lock)  # Ensure lock is removed on exit
-    log(f"Lock file {LOCK_FILE} created.")
-
+    atexit.register(release_lock)  # Ensure lock is removed on normal exit
+    log(f"Lock file {LOCK_FILE} created and locked.")
 def release_lock():
-    if LOCK_FILE and os.path.exists(LOCK_FILE):
-        with open(LOCK_FILE, 'r') as f:
-            existing_pid = f.read().strip()
-        if str(os.getpid()) == existing_pid:  # Only remove if the PIDs match
-            os.remove(LOCK_FILE)
-            log(f"Lock file {LOCK_FILE} released.")
-        else:
-            log(f"Lock file {LOCK_FILE} not removed (owned by PID {existing_pid}).")
-
+    """Release lock; only unlink if the PID matches ours."""
+    global _LOCK_FD
+    if not LOCK_FILE:
+        return
+    try:
+        if _LOCK_FD is not None:
+            try:
+                fcntl.flock(_LOCK_FD, fcntl.LOCK_UN)
+            finally:
+                os.close(_LOCK_FD)
+                _LOCK_FD = None
+        # Unlink only if we still own it
+        try:
+            with open(LOCK_FILE, "r") as f:
+                existing_pid = (f.read() or "").strip()
+            if existing_pid == str(os.getpid()):
+                os.remove(LOCK_FILE)
+                log(f"Lock file {LOCK_FILE} released.")
+            elif existing_pid:
+                log(f"Lock file {LOCK_FILE} not removed (owned by PID {existing_pid}).")
+        except FileNotFoundError:
+            pass
+    except Exception as e:
+        log(f"Lock release error: {e}", "WARN")
 def handle_signal(signum, frame):
     # Handle termination signals to release the lock properly
     print(f"Received signal {signum}, cleaning up...")
@@ -631,6 +657,9 @@ def main():
     if cmd in ["mount","rotateflush","flush","unmount","remount"]:
         check_and_create_lock("omv-writecache")
         ensure_persistent_journal()
+    elif cmd in ["-v", "--version", "version"]:
+        print(SCRIPT_VERSION)
+        sys.exit(0)
 
     log(f"SCRIPT_START: omv-writecache {cmd}")
 
