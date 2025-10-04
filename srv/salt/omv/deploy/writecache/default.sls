@@ -17,6 +17,15 @@
 
 {% set config = salt['omv_conf.get']('conf.service.writecache') %}
 
+php-fpm-tmpfiles-conf:
+  file.managed:
+    - name: /etc/tmpfiles.d/php-fpm.conf
+    - contents: |
+        d /run/php 0755 root root -
+    - mode: '0644'
+    - user: root
+    - group: root
+
 configure_writecache_config_dir:
   file.directory:
     - name: "/etc/omv-writecache"
