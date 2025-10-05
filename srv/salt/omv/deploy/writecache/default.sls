@@ -17,6 +17,15 @@
 
 {% set config = salt['omv_conf.get']('conf.service.writecache') %}
 
+php-fpm-tmpfiles-conf:
+  file.managed:
+    - name: /etc/tmpfiles.d/php-fpm.conf
+    - contents: |
+        d /run/php 0755 root root -
+    - mode: '0644'
+    - user: root
+    - group: root
+
 configure_writecache_config_dir:
   file.directory:
     - name: "/etc/omv-writecache"
@@ -83,11 +92,11 @@ omv-writecache-setup_service:
         [Unit]
         Description=OMV WriteCache: mount overlays (tmpfs upper) for selected paths
         DefaultDependencies=no
-        After=local-fs-pre.target local-fs.target systemd-tmpfiles-setup.service
+        After=systemd-remount-fs.service
+        Before=systemd-tmpfiles-setup.service systemd-journald.service local-fs.target postfix@-.service
         RequiresMountsFor=/var
-        Wants=tmp.mount local-fs.target
-        Before=systemd-journald.socket systemd-journald.service systemd-journald-dev-log.socket systemd-journald-audit.socket
-        Before=multi-user.target shutdown.target postfix@-.service
+        Wants=tmp.mount
+        Conflicts=shutdown.target
 
         [Service]
         Type=oneshot
