@@ -6,7 +6,7 @@
 # License version 2. This program is licensed "as is" without any
 # warranty of any kind, whether express or implied.
 #
-# version: 0.1.3
+# version: 0.1.4
 #
 # Test script for omv-writecache
 # Uses the config at /etc/omv-writecache/config.yaml and tests
@@ -353,8 +353,6 @@ class WriteCacheTest:
             t = threading.Thread(target=lambda: results.append(try_flush()))
             threads.append(t)
             t.start()
-            if i == 0:
-                time.sleep(0.3)  # Let first one acquire lock
 
         for t in threads:
             t.join(timeout=60)
