@@ -1,5 +1,5 @@
-openmediavault-writecache (7.0.0-7) unstable; urgency=low
+openmediavault-writecache (7.0.0-8) unstable; urgency=low
 
   * Initial release
 
- -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Sat, 04 Oct 2025 21:27:08 -0500
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Wed, 08 Oct 2025 11:54:23 -0500
