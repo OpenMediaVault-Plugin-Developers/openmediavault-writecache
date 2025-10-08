@@ -6,7 +6,7 @@
 # License version 2. This program is licensed "as is" without any
 # warranty of any kind, whether express or implied.
 #
-# version: 0.0.4
+# version: 0.0.5
 #
 import os, sys, subprocess, time, re, shutil
 import pwd, grp
@@ -19,7 +19,7 @@ try:
 except Exception:
     yaml = None
 
-SCRIPT_VERSION = "0.0.4"
+SCRIPT_VERSION = "0.0.5"
 CONFIG = Path("/etc/omv-writecache/config.yaml")
 TMPFS_MOUNT = Path("/run/omv-writecache")
 LOG_FILE = "/var/log/omv-writecache.log"
@@ -55,23 +55,27 @@ def check_and_create_lock(lockname):
     except BlockingIOError:
         # Someone else holds it; read PID for diagnostics if possible
         try:
-            with open(LOCK_FILE, "r") as f:
-                owner_pid = f.read().strip() or "unknown"
+            # Use pread to avoid seek races
+            owner_pid = os.read(_LOCK_FD, 32).decode('ascii').strip() or "unknown"
         except Exception:
             owner_pid = "unknown"
+        os.close(_LOCK_FD)
+        _LOCK_FD = None
         log(f"Instance with lock name {lockname} and PID {owner_pid} is already running!", "WARN")
         sys.exit(1)
 
     # We own the lock now; write our PID
     try:
         os.ftruncate(_LOCK_FD, 0)
+        os.lseek(_LOCK_FD, 0, os.SEEK_SET)
         os.write(_LOCK_FD, str(os.getpid()).encode("ascii"))
         os.fsync(_LOCK_FD)
-    except Exception:
-        pass
+    except Exception as e:
+        log(f"Failed to write PID to lock file: {e}", "WARN")
 
     atexit.register(release_lock)  # Ensure lock is removed on normal exit
     log(f"Lock file {LOCK_FILE} created and locked.")
+
 def release_lock():
     """Release lock; only unlink if the PID matches ours."""
     global _LOCK_FD
@@ -646,20 +650,23 @@ def cmd_unmount():
     unmount(cfg)
 
 def main():
-    if os.geteuid() != 0:
-        print("This tool must be run as root", file=sys.stderr)
-        sys.exit(1)
     if len(sys.argv) < 2:
         print("Usage: omv-writecache [mount|rotateflush|flush|unmount|remount|status]")
         sys.exit(2)
+
     cmd = sys.argv[1]
 
-    if cmd in ["mount","rotateflush","flush","unmount","remount"]:
-        check_and_create_lock("omv-writecache")
-        ensure_persistent_journal()
-    elif cmd in ["-v", "--version", "version"]:
+    if cmd in ["-v", "--version", "version"]:
         print(SCRIPT_VERSION)
         sys.exit(0)
+
+    if os.geteuid() != 0:
+        print("This tool must be run as root", file=sys.stderr)
+        sys.exit(1)
+
+    check_and_create_lock("omv-writecache")
+    if cmd in ["mount","rotateflush","flush","unmount","remount"]:
+        ensure_persistent_journal()
 
     log(f"SCRIPT_START: omv-writecache {cmd}")
 
