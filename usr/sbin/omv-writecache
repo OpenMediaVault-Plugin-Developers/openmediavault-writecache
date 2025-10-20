@@ -6,7 +6,7 @@
 # License version 2. This program is licensed "as is" without any
 # warranty of any kind, whether express or implied.
 #
-# version: 0.0.5
+# version: 0.0.6
 #
 import os, sys, subprocess, time, re, shutil
 import pwd, grp
@@ -206,7 +206,7 @@ def ensure_persistent_journal():
                         os.chmod(journal_dir, 0o2755)
                         # ensure machine id subdirectory exists
                         try:
-                            mid = pathlib.Path("/etc/machine-id").read_text().strip()
+                            mid = Path("/etc/machine-id").read_text().strip()
                         except FileNotFoundError:
                             mid = ""
                         if mid:
