@@ -6,7 +6,7 @@
 # License version 2. This program is licensed "as is" without any
 # warranty of any kind, whether express or implied.
 #
-# version: 0.1.4
+# version: 0.2.0
 #
 # Test script for omv-writecache
 # Uses the config at /etc/omv-writecache/config.yaml and tests
@@ -24,7 +24,7 @@ import stat
 import threading
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
 
 # -------- Settings --------
 CONFIG_PATH = Path("/etc/omv-writecache/config.yaml")
@@ -84,6 +84,69 @@ def log_test(msg: str, level: str = "INFO"):
     except Exception:
         pass
 
+# -------- Cleanup Tracker --------
+class CleanupTracker:
+    """Tracks all ephemeral files and directories created during testing"""
+    def __init__(self):
+        self.files: Set[Path] = set()
+        self.directories: Set[Path] = set()
+
+    def track_file(self, path: Path):
+        """Track a file for cleanup"""
+        self.files.add(path)
+
+    def track_directory(self, path: Path):
+        """Track a directory for cleanup"""
+        self.directories.add(path)
+
+    def cleanup_all(self):
+        """Clean up all tracked files and directories"""
+        cleaned_files = 0
+        cleaned_dirs = 0
+        errors = []
+
+        # Clean files first
+        for fpath in sorted(self.files):
+            try:
+                if fpath.exists():
+                    fpath.unlink()
+                    log_test(f"Removed file :: {fpath}", "INFO")
+                    cleaned_files += 1
+            except Exception as e:
+                errors.append(f"File {fpath}: {e}")
+
+        # Clean directories (deepest first) - ONLY remove if they are test directories
+        for dpath in sorted(self.directories, key=lambda p: len(p.parts), reverse=True):
+            try:
+                if dpath.exists() and dpath.is_dir():
+                    # Safety check: only remove directories with "omvwc_" in the name
+                    if "omvwc_" in dpath.name or dpath.name.startswith("test_"):
+                        # Try to remove if empty
+                        try:
+                            dpath.rmdir()
+                            log_test(f"Removed directory :: {dpath}", "INFO")
+                            cleaned_dirs += 1
+                        except OSError:
+                            # Not empty, force remove
+                            log_test(f"Force remove directory :: {dpath}", "INFO")
+                            shutil.rmtree(dpath, ignore_errors=True)
+                            if not dpath.exists():
+                                cleaned_dirs += 1
+            except Exception as e:
+                errors.append(f"Directory {dpath}: {e}")
+
+        if cleaned_files > 0 or cleaned_dirs > 0:
+            log_test(f"Cleaned up {cleaned_files} files and {cleaned_dirs} directories", "INFO")
+
+        if errors:
+            log_test(f"Cleanup errors: {len(errors)}", "WARN")
+            for err in errors[:5]:  # Show first 5 errors
+                log_test(f"  {err}", "DEBUG")
+
+        # Clear tracking sets
+        self.files.clear()
+        self.directories.clear()
+
 # -------- Helpers --------
 def load_config_paths() -> Dict[str, str]:
     """
@@ -132,9 +195,6 @@ def run_cmd(cmd: str) -> Tuple[bool, str]:
     Run omv-writecache subcommand from a safe cwd so unmount/remount
     won't invalidate the child's working directory.
     """
-    from pathlib import Path
-    import os, subprocess
-
     # Resolve script path to an absolute path; fall back to /usr/sbin/omv-writecache
     sp = Path(SCRIPT_PATH)
     if not sp.is_absolute():
@@ -206,14 +266,17 @@ def get_tmpfs_usage() -> Tuple[int, int]:
 
 # -------- Test file helper --------
 class TestFile:
-    def __init__(self, path: Path, content: Optional[str] = None):
+    def __init__(self, path: Path, content: Optional[str] = None, tracker: Optional[CleanupTracker] = None):
         self.path = path
         self.content = content or f"Test content for {path.name} at {time.time()}"
         self.checksum = hashlib.md5(self.content.encode()).hexdigest()
+        self.tracker = tracker
 
     def create(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(self.content)
+        if self.tracker:
+            self.tracker.track_file(self.path)
         os.sync()
 
     def exists(self) -> bool:
@@ -240,6 +303,7 @@ class WriteCacheTest:
     def __init__(self):
         self.config_paths = load_config_paths()
         self.test_files: Dict[str, List[TestFile]] = {}
+        self.cleanup_tracker = CleanupTracker()
 
     def create_test_files(self, tag: str):
         log_test(f"Creating test files: {tag}", "INFO")
@@ -252,7 +316,7 @@ class WriteCacheTest:
             files: List[TestFile] = []
             for i in range(2):
                 fname = f"omvwc_{tag}_{i}_{int(time.time())}.txt"
-                tf = TestFile(base / fname)
+                tf = TestFile(base / fname, tracker=self.cleanup_tracker)
                 try:
                     tf.create()
                     files.append(tf)
@@ -264,7 +328,8 @@ class WriteCacheTest:
             subdir = base / f"omvwc_subdir_{tag}"
             try:
                 subdir.mkdir(parents=True, exist_ok=True)
-                subfile = TestFile(subdir / "subfile.txt")
+                self.cleanup_tracker.track_directory(subdir)
+                subfile = TestFile(subdir / "subfile.txt", tracker=self.cleanup_tracker)
                 subfile.create()
                 files.append(subfile)
                 created += 1
@@ -398,6 +463,8 @@ class WriteCacheTest:
             return True
 
         fill_file = test_path / f"omvwc_fill_{int(time.time())}.dat"
+        self.cleanup_tracker.track_file(fill_file)
+
         try:
             # Create large file
             with open(fill_file, "wb") as f:
@@ -412,6 +479,7 @@ class WriteCacheTest:
 
             # Try to create more files (should handle gracefully)
             small_file = test_path / f"omvwc_small_{int(time.time())}.txt"
+            self.cleanup_tracker.track_file(small_file)
             try:
                 small_file.write_text("small content")
                 created = True
@@ -457,6 +525,8 @@ class WriteCacheTest:
             return True
 
         test_file = test_path / f"omvwc_perms_{int(time.time())}.txt"
+        self.cleanup_tracker.track_file(test_file)
+
         try:
             # Create file with special permissions
             test_file.write_text("permission test")
@@ -509,6 +579,8 @@ class WriteCacheTest:
 
         target_file = test_path / f"omvwc_target_{int(time.time())}.txt"
         symlink_file = test_path / f"omvwc_link_{int(time.time())}.txt"
+        self.cleanup_tracker.track_file(target_file)
+        self.cleanup_tracker.track_file(symlink_file)
 
         try:
             # Create target and symlink
@@ -564,16 +636,19 @@ class WriteCacheTest:
 
         # Create deep hierarchy (30 levels)
         base_dir = test_path / f"omvwc_deep_{int(time.time())}"
+        self.cleanup_tracker.track_directory(base_dir)
         current = base_dir
         depth = 30
 
         try:
             for i in range(depth):
                 current = current / f"level_{i}"
+                self.cleanup_tracker.track_directory(current)
             current.mkdir(parents=True, exist_ok=True)
 
             # Create file at deepest level
             deep_file = current / "deep_file.txt"
+            self.cleanup_tracker.track_file(deep_file)
             deep_file.write_text("deep content")
 
             # Flush
@@ -617,6 +692,7 @@ class WriteCacheTest:
             return True
 
         test_file = test_path / f"omvwc_whiteout_{int(time.time())}.txt"
+        self.cleanup_tracker.track_file(test_file)
 
         try:
             # Create, delete, recreate cycle
@@ -706,6 +782,7 @@ class WriteCacheTest:
             return True
 
         large_file = test_path / f"omvwc_large_{int(time.time())}.dat"
+        self.cleanup_tracker.track_file(large_file)
 
         try:
             # Create file with known pattern
@@ -780,6 +857,7 @@ class WriteCacheTest:
                 f = test_path / f"{base_name}_{i}.txt"
                 f.write_text(f"content {i}")
                 files_created.append(f)
+                self.cleanup_tracker.track_file(f)
 
             # Rapid modify
             for f in files_created[:25]:
@@ -870,6 +948,7 @@ class WriteCacheTest:
             return True
 
         empty_dir = test_path / f"omvwc_empty_{int(time.time())}"
+        self.cleanup_tracker.track_directory(empty_dir)
 
         try:
             empty_dir.mkdir(parents=True, exist_ok=True)
@@ -916,6 +995,7 @@ class WriteCacheTest:
         # Create 250 char filename (leave room for extension)
         long_name = "omvwc_" + "x" * 240 + ".txt"
         long_file = test_path / long_name
+        self.cleanup_tracker.track_file(long_file)
 
         try:
             long_file.write_text("long filename content")
@@ -972,6 +1052,7 @@ class WriteCacheTest:
                 f = test_path / name
                 f.write_text(f"content for {name}")
                 files.append(f)
+                self.cleanup_tracker.track_file(f)
 
             # Flush
             ok, _ = run_cmd("flush")
@@ -1033,114 +1114,120 @@ class WriteCacheTest:
             "unicode_filenames": False,
         }
 
-        # Mount
-        log_test("\n>>> Test 1: mount", "INFO")
-        ok, _ = run_cmd("mount")
-        results["mount"] = ok
-        if not ok:
-            log_test("Mount failed, aborting.", "FAIL")
+        try:
+            # Mount
+            log_test("\n>>> Test 1: mount", "INFO")
+            ok, _ = run_cmd("mount")
+            results["mount"] = ok
+            if not ok:
+                log_test("Mount failed, aborting.", "FAIL")
+                return results
+
+            # Verify overlays report mounted
+            for path in self.config_paths.keys():
+                if check_overlay_mounted(path):
+                    log_test(f"Overlay mounted: {path}", "SUCCESS")
+                else:
+                    log_test(f"Overlay NOT mounted: {path}", "FAIL")
+                    results["mount"] = False
+
+            # Create files inside overlays
+            log_test("\n>>> Test 2: create files", "INFO")
+            self.create_test_files(tag="t1")
+            time.sleep(1)
+            results["file_creation"] = self.verify_files(tag="t1", should_exist=True)
+            log_test("File creation/verify: " + ("OK" if results["file_creation"] else "FAIL"),
+                     "SUCCESS" if results["file_creation"] else "FAIL")
+
+            # Journald test
+            log_test("\n>>> Test 3: journald receive", "INFO")
+            results["journald"] = test_journald_receive()
+
+            # Flush
+            log_test("\n>>> Test 4: flush", "INFO")
+            ok, _ = run_cmd("flush")
+            results["flush"] = ok
+            if not ok:
+                log_test("Flush failed.", "FAIL")
+            else:
+                still_ok = self.verify_files(tag="t1", should_exist=True)
+                results["flush"] = results["flush"] and still_ok
+                log_test("Flush verify: " + ("OK" if still_ok else "FAIL"),
+                         "SUCCESS" if still_ok else "FAIL")
+
+            # Delete files (whiteout behavior)
+            log_test("\n>>> Test 5: delete files", "INFO")
+            self.delete_test_files(tag="t1")
+            time.sleep(1)
+            results["deletion"] = self.verify_files(tag="t1", should_exist=False)
+            log_test("Deletion verify: " + ("OK" if results["deletion"] else "FAIL"),
+                     "SUCCESS" if results["deletion"] else "FAIL")
+
+            # Run before unmount
+            results["concurrent_ops"] = self.test_concurrent_operations()
+            results["special_permissions"] = self.test_special_permissions()
+            results["symlinks"] = self.test_symlinks()
+            results["deep_directories"] = self.test_deep_directories()
+            results["whiteout_scenarios"] = self.test_whiteout_scenarios()
+            results["status_command"] = self.test_status_command()
+            results["large_files"] = self.test_large_files()
+            results["rapid_io"] = self.test_rapid_operations()
+            results["double_mount"] = self.test_double_mount()
+            results["empty_directories"] = self.test_empty_directories()
+            results["long_filenames"] = self.test_long_filenames()
+            results["unicode_filenames"] = self.test_unicode_filenames()
+            results["disk_exhaustion"] = self.test_disk_space_exhaustion()
+
+            # Create more files, then unmount
+            log_test("\n>>> Prepare for unmount: create more files", "INFO")
+            self.create_test_files(tag="t2")
+            time.sleep(1)
+
+            log_test("\n>>> Test 6: unmount", "INFO")
+            ok, _ = run_cmd("unmount")
+            results["unmount"] = ok
+            if not ok:
+                log_test("Unmount failed.", "FAIL")
+            else:
+                persisted_ok = self.verify_persistence_per_policy(tag="t2")
+                results["persistence"] = persisted_ok
+                log_test("Persistence after unmount (per policy): " + ("OK" if persisted_ok else "FAIL"),
+                         "SUCCESS" if persisted_ok else "FAIL")
+
+            log_test("\n>>> Cleanup", "INFO")
+            self.delete_test_files(tag="t1")
+            self.delete_test_files(tag="t2")
+            self.cleanup_tracker.cleanup_all()
+
+            # Final remount (sanity)
+            log_test("\n>>> Remount sanity", "INFO")
+            run_cmd("mount")
+
+            # Summary
+            log_test("\n===== TEST SUMMARY =====", "INFO")
+            all_ok = True
+            passed = 0
+            failed = 0
+            for k, v in results.items():
+                all_ok &= v
+                if v:
+                    passed += 1
+                else:
+                    failed += 1
+                log_test(f"{k.ljust(20)}: " + ("PASSED" if v else "FAILED"),
+                         "SUCCESS" if v else "FAIL")
+
+            log_test(f"\nTotal: {passed} passed, {failed} failed",
+                     "SUCCESS" if all_ok else "FAIL")
+
             return results
 
-        # Verify overlays report mounted
-        for path in self.config_paths.keys():
-            if check_overlay_mounted(path):
-                log_test(f"Overlay mounted: {path}", "SUCCESS")
-            else:
-                log_test(f"Overlay NOT mounted: {path}", "FAIL")
-                results["mount"] = False
-
-        # Create files inside overlays
-        log_test("\n>>> Test 2: create files", "INFO")
-        self.create_test_files(tag="t1")
-        time.sleep(1)
-        results["file_creation"] = self.verify_files(tag="t1", should_exist=True)
-        log_test("File creation/verify: " + ("OK" if results["file_creation"] else "FAIL"),
-                 "SUCCESS" if results["file_creation"] else "FAIL")
-
-        # Journald test
-        log_test("\n>>> Test 3: journald receive", "INFO")
-        results["journald"] = test_journald_receive()
-
-        # Flush
-        log_test("\n>>> Test 4: flush", "INFO")
-        ok, _ = run_cmd("flush")
-        results["flush"] = ok
-        if not ok:
-            log_test("Flush failed.", "FAIL")
-        else:
-            still_ok = self.verify_files(tag="t1", should_exist=True)
-            results["flush"] = results["flush"] and still_ok
-            log_test("Flush verify: " + ("OK" if still_ok else "FAIL"),
-                     "SUCCESS" if still_ok else "FAIL")
-
-        # Delete files (whiteout behavior)
-        log_test("\n>>> Test 5: delete files", "INFO")
-        self.delete_test_files(tag="t1")
-        time.sleep(1)
-        results["deletion"] = self.verify_files(tag="t1", should_exist=False)
-        log_test("Deletion verify: " + ("OK" if results["deletion"] else "FAIL"),
-                 "SUCCESS" if results["deletion"] else "FAIL")
-
-        # Run before unmount
-        results["concurrent_ops"] = self.test_concurrent_operations()
-        results["special_permissions"] = self.test_special_permissions()
-        results["symlinks"] = self.test_symlinks()
-        results["deep_directories"] = self.test_deep_directories()
-        results["whiteout_scenarios"] = self.test_whiteout_scenarios()
-        results["status_command"] = self.test_status_command()
-        results["large_files"] = self.test_large_files()
-        results["rapid_io"] = self.test_rapid_operations()
-        results["double_mount"] = self.test_double_mount()
-        results["empty_directories"] = self.test_empty_directories()
-        results["long_filenames"] = self.test_long_filenames()
-        results["unicode_filenames"] = self.test_unicode_filenames()
-        results["disk_exhaustion"] = self.test_disk_space_exhaustion()
-
-        # Create more files, then unmount
-        log_test("\n>>> Prepare for unmount: create more files", "INFO")
-        self.create_test_files(tag="t2")
-        time.sleep(1)
-
-        log_test("\n>>> Test 6: unmount", "INFO")
-        ok, _ = run_cmd("unmount")
-        results["unmount"] = ok
-        if not ok:
-            log_test("Unmount failed.", "FAIL")
-        else:
-            persisted_ok = self.verify_persistence_per_policy(tag="t2")
-            results["persistence"] = persisted_ok
-            log_test("Persistence after unmount (per policy): " + ("OK" if persisted_ok else "FAIL"),
-                     "SUCCESS" if persisted_ok else "FAIL")
-
-        log_test("\n>>> Cleanup", "INFO")
-        self.delete_test_files(tag="t1")
-        self.delete_test_files(tag="t2")
-
-        # Final remount (sanity)
-        log_test("\n>>> Remount sanity", "INFO")
-        run_cmd("mount")
-
-        # Summary
-        log_test("\n===== TEST SUMMARY =====", "INFO")
-        all_ok = True
-        passed = 0
-        failed = 0
-        for k, v in results.items():
-            all_ok &= v
-            if v:
-                passed += 1
-            else:
-                failed += 1
-            log_test(f"{k.ljust(20)}: " + ("PASSED" if v else "FAILED"),
-                     "SUCCESS" if v else "FAIL")
-
-        log_test(f"\nTotal: {passed} passed, {failed} failed",
-                 "SUCCESS" if all_ok else "FAIL")
-
-        return results
+        finally:
+            # Ensure cleanup happens even if tests are interrupted
+            log_test("\n>>> Final cleanup", "INFO")
+            self.cleanup_tracker.cleanup_all()
 
 def test_journald_receive() -> bool:
-    import time, shutil
     tag = "wc_journald_test"
     msg = f"journald test @{int(time.time())}"
     # If systemd-cat is missing, fall back to logger only
@@ -1184,10 +1271,14 @@ def main():
         sys.exit(0 if all(results.values()) else 1)
     except KeyboardInterrupt:
         print(colored("\nInterrupted", Colors.YELLOW))
+        log_test("\n>>> Emergency cleanup after interrupt", "WARN")
+        tester.cleanup_tracker.cleanup_all()
         sys.exit(130)
     except Exception as e:
         print(colored(f"\nTest failed: {e}", Colors.RED))
         import traceback; traceback.print_exc()
+        log_test("\n>>> Emergency cleanup after error", "WARN")
+        tester.cleanup_tracker.cleanup_all()
         sys.exit(1)
     finally:
         log_test("Test complete.", "INFO")
