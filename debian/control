@@ -11,7 +11,8 @@ Architecture: all
 Depends: openmediavault (>= 7.7.17),
          jq,
          ${misc:Depends}
-Conflicts: openmediavault-flashmemory
+Conflicts: folder2ram,
+           openmediavault-flashmemory
 Description: openmediavault plugin to reduce OS writes using tmpfs+overlayfs
  Provides an overlay-based write cache for selected system directories
  (e.g., /var/log, APT caches) using tmpfs as the upperdir. Changes can be
