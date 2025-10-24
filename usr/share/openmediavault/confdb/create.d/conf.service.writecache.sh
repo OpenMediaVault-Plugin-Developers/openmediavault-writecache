@@ -13,6 +13,8 @@ if ! omv_config_exists "${xpath}"; then
   omv_config_add_key "${xpath}" "tmpfs_size" "25%"
   omv_config_add_key "${xpath}" "journald_storage" "auto"
   omv_config_add_key "${xpath}" "flush_on_shutdown" "1"
+  omv_config_add_key "${xpath}" "hour" "3"
+  omv_config_add_key "${xpath}" "minute" "45"
   omv_config_add_key "${xpath}" "rotate_on_shutdown" "1"
   omv_config_add_key "${xpath}" "flush_daily" "0"
   omv_config_add_key "${xpath}" "rotate_on_daily_flush" "1"
@@ -33,6 +35,12 @@ if ! omv_config_exists "${xpath}/rotate_on_shutdown"; then
 fi
 if ! omv_config_exists "${xpath}/rotate_on_daily_flush"; then
   omv_config_add_key "${xpath}" "rotate_on_daily_flush" "1"
+fi
+if ! omv_config_exists "${xpath}/hour"; then
+  omv_config_add_key "${xpath}" "hour" "3"
+fi
+if ! omv_config_exists "${xpath}/minute"; then
+  omv_config_add_key "${xpath}" "minute" "45"
 fi
 
 exit 0

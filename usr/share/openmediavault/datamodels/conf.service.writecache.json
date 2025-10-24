@@ -36,6 +36,14 @@
       "type": "boolean",
       "default": false
     },
+    "hour": {
+      "type": "integer",
+      "default": 3
+    },
+    "minute": {
+      "type": "integer",
+      "default": 45
+    },
     "rotate_on_daily_flush": {
       "type": "boolean",
       "default": true

@@ -120,7 +120,7 @@ omv-writecache-flush_service:
         Before=umount.target systemd-journal-flush.service
         Wants=umount.target
         Conflicts=umount.target
-        
+
         [Service]
         Type=oneshot
 {%- if config.rotate_on_shutdown | to_bool %}
@@ -128,7 +128,7 @@ omv-writecache-flush_service:
 {%- else %}
         ExecStart=/usr/sbin/omv-writecache flush
 {%- endif %}
-        
+
         [Install]
         WantedBy=umount.target
     - user: root
@@ -188,9 +188,9 @@ omv_writecache_cron:
         {{ pillar['headers']['auto_generated'] }}
         {{ pillar['headers']['warning'] }}
 {%- if config.rotate_on_daily_flush | to_bool %}
-        45 3 * * * root /usr/sbin/omv-writecache rotateflush >/dev/null 2>&1
+        {{ config.minute }} {{ config.hour }} * * * root /usr/sbin/omv-writecache rotateflush >/dev/null 2>&1
 {%- else %}
-        45 3 * * * root /usr/sbin/omv-writecache flush >/dev/null 2>&1
+        {{ config.minute }} {{ config.hour }} * * * root /usr/sbin/omv-writecache flush >/dev/null 2>&1
 {%- endif %}
 
 {% else %}
