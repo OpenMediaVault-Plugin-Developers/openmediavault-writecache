@@ -6,7 +6,7 @@
 # License version 2. This program is licensed "as is" without any
 # warranty of any kind, whether express or implied.
 #
-# version: 0.0.6
+# version: 0.0.7
 #
 import os, sys, subprocess, time, re, shutil
 import pwd, grp
@@ -19,7 +19,7 @@ try:
 except Exception:
     yaml = None
 
-SCRIPT_VERSION = "0.0.5"
+SCRIPT_VERSION = "0.0.7"
 CONFIG = Path("/etc/omv-writecache/config.yaml")
 TMPFS_MOUNT = Path("/run/omv-writecache")
 LOG_FILE = "/var/log/omv-writecache.log"
@@ -167,19 +167,19 @@ def ensure_lower_bind(real_path: Path, name: str) -> Path:
 def remount_lower(lower: Path, rw: bool):
     run(["mount", "-o", f"remount,{'rw' if rw else 'ro'},bind", str(lower)], check=False)
 
-def run(cmd, check=True):
+def run(cmd, check=True, quiet=False):
     cmd_str = ' '.join(cmd)
     log(f"CMD: {cmd_str}", "DEBUG")
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     if res.returncode != 0:
         log(f"CMD_FAILED: {cmd_str} (exit {res.returncode})", "ERROR")
-        if res.stdout.strip():
+        if res.stdout.strip() and not quiet:
             log(f"OUTPUT: {res.stdout.strip()}", "ERROR")
         if check:
             raise SystemExit(res.returncode)
     else:
         log(f"CMD_OK: {cmd_str}", "DEBUG")
-        if res.stdout.strip():
+        if res.stdout.strip() and not quiet:
             log(f"OUTPUT: {res.stdout.strip()}", "DEBUG")
     return res
 
@@ -447,6 +447,7 @@ def rsync_upper_to_lower(upper_dir, lower_dir):
     - Preserve perms, times, ACLs, hardlinks (no xattrs).
     - Avoid specials/devices so we don't mknod transient files.
     - Treat rsync 23/24 as non-fatal (vanished files etc.).
+    - Report number of files transferred.
     """
     os.makedirs(lower_dir, exist_ok=True)
     upper_dir = os.path.abspath(upper_dir)
@@ -459,10 +460,36 @@ def rsync_upper_to_lower(upper_dir, lower_dir):
         "rsync", "-aHA", "--inplace",
         "--no-specials", "--no-devices",
         "--exclude", ".wh.*",
+        "--stats", "--human-readable",
         upper_dir.rstrip("/") + "/",
         lower_dir.rstrip("/") + "/",
     ]
-    proc = run(args, check=False)
+    proc = run(args, check=False, quiet=True)
+    output = proc.stdout or ""
+    error = proc.stderr or ""
+    transferred = 0
+    total_bytes = None
+
+    for line in output.splitlines():
+        if "Number of regular files transferred" in line:
+            try:
+                transferred = int(line.split(":")[1].strip())
+            except (IndexError, ValueError):
+                pass
+        elif "Total transferred file size" in line:
+            try:
+                total_bytes = line.split(":")[1].strip()
+            except IndexError:
+                pass
+
+    if transferred > 0 or total_bytes:
+        info = []
+        if transferred:
+            info.append(f"{transferred} files")
+        if total_bytes:
+            info.append(f"{total_bytes} transferred")
+        log(f"RSYNC_STATS: {upper_dir} -> {lower_dir} :: {'; '.join(info)}", "INFO")
+
     if proc.returncode == 0:
         log(f"RSYNC_OK: {upper_dir} -> {lower_dir}", "DEBUG")
         return True
@@ -470,7 +497,7 @@ def rsync_upper_to_lower(upper_dir, lower_dir):
         # Partial/vanished files — OK for log dirs and ephemeral paths
         log(f"RSYNC_WARN({proc.returncode}): {upper_dir} -> {lower_dir} (partial/vanished files)", "WARN")
         return True
-    log(f"RSYNC_FAILED: exit {proc.returncode}", "ERROR")
+    log(f"RSYNC_FAILED: exit {proc.returncode} ({error.strip()})", "ERROR")
     return False
 
 
