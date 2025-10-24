@@ -22,31 +22,31 @@ msgstr ""
 "Plural-Forms: nplurals=1; plural=0;\n"
 
 msgid "Date & Time"
-msgstr ""
+msgstr "日期 & 时间"
 
 msgid "Details"
-msgstr ""
+msgstr "详情"
 
 msgid "Enabled"
 msgstr "启用"
 
 msgid "Event"
-msgstr ""
+msgstr "事件"
 
 msgid "Flush"
-msgstr ""
+msgstr "刷新"
 
 msgid "Flush daily"
-msgstr "每天清除"
+msgstr "每天刷新"
 
 msgid "Flush on shutdown"
-msgstr "关机时清除"
+msgstr "关机时刷新"
 
 msgid "Journal storage"
 msgstr "日志存储"
 
 msgid "Level"
-msgstr ""
+msgstr "级"
 
 msgid "One entry per line <path> = drop|flush"
 msgstr "每行一个输入 <path> = drop|flush"
@@ -67,13 +67,13 @@ msgid "Run journalctl rotate and sync before flush"
 msgstr ""
 
 msgid "Running manual flush ..."
-msgstr ""
+msgstr "运行手动刷新 ..."
 
 msgid "Running manual rotate and flush ..."
 msgstr ""
 
 msgid "Running test ..."
-msgstr ""
+msgstr "运行测试 ..."
 
 msgid ""
 "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, "
@@ -81,10 +81,10 @@ msgid ""
 msgstr "分配给 /run/omv-writecache tmpfs 的大小。可使用 %，M/G后缀；例如：512M, 2G, 25%。"
 
 msgid "Test"
-msgstr ""
+msgstr "测试"
 
 msgid "Will flush at 03:45 daily"
-msgstr "在每天 03:45 清除"
+msgstr "在每天 03:45 刷新"
 
 msgid "Write Cache"
 msgstr "写缓存"

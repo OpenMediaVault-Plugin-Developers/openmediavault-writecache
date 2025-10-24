@@ -3,6 +3,9 @@
 # This file is distributed under the same license as the openmediavault-writecache package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
 # 
+# Translators:
+# Stephan Paternotte <stephan@paternottes.net>, 2025
+# 
 #, fuzzy
 msgid ""
 msgstr ""
@@ -10,6 +13,7 @@ msgstr ""
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2025-09-21 11:17-0500\n"
 "PO-Revision-Date: 2025-08-17 20:57+0000\n"
+"Last-Translator: Stephan Paternotte <stephan@paternottes.net>, 2025\n"
 "Language-Team: Dutch (https://app.transifex.com/openmediavault-plugin-developers/teams/1854/nl/)\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
@@ -18,87 +22,89 @@ msgstr ""
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
 
 msgid "Date & Time"
-msgstr ""
+msgstr "Datum & Tijd"
 
 msgid "Details"
-msgstr ""
+msgstr "Details"
 
 msgid "Enabled"
-msgstr ""
+msgstr "Ingeschakeld"
 
 msgid "Event"
-msgstr ""
+msgstr "Gebeurtenis"
 
 msgid "Flush"
-msgstr ""
+msgstr "Doorspoelen"
 
 msgid "Flush daily"
-msgstr ""
+msgstr "Dagelijks doorspoelen"
 
 msgid "Flush on shutdown"
-msgstr ""
+msgstr "Doorspoelen bij afsluiten"
 
 msgid "Journal storage"
-msgstr ""
+msgstr "Journaal-opslag"
 
 msgid "Level"
-msgstr ""
+msgstr "Niveau"
 
 msgid "One entry per line <path> = drop|flush"
-msgstr ""
+msgstr "Een item per regel <path> = dropflush"
 
 msgid "Overlay paths and policy"
-msgstr ""
+msgstr "Overlaypaden en beleid"
 
 msgid "Rotate & Flush"
-msgstr ""
+msgstr "Roteren & Doorspoelen"
 
 msgid "Rotate on daily flush"
-msgstr ""
+msgstr "Roteren bij dagelijks doorspoelen"
 
 msgid "Rotate on shutdown"
-msgstr ""
+msgstr "Roteren bij afsluiten"
 
 msgid "Run journalctl rotate and sync before flush"
-msgstr ""
+msgstr "Journalctl rotate en sync uitvoeren vóór doorspoelen"
 
 msgid "Running manual flush ..."
-msgstr ""
+msgstr "Handmatig doorspoelen…"
 
 msgid "Running manual rotate and flush ..."
-msgstr ""
+msgstr "Handmatig roteren en doorspoelen…"
 
 msgid "Running test ..."
-msgstr ""
+msgstr "Test uitvoeren…"
 
 msgid ""
 "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, "
 "25%."
 msgstr ""
+"Grootte voor /run/omv-writecache tmpfs. Accepteert %, M/G suffix; bijv. "
+"512M, 2G, 25%."
 
 msgid "Test"
-msgstr ""
+msgstr "Test"
 
 msgid "Will flush at 03:45 daily"
-msgstr ""
+msgstr "Zal dagelijks om 03:45 doorspoelen"
 
 msgid "Write Cache"
-msgstr ""
+msgstr "Write Cache"
 
 msgid "Write Cache settings"
-msgstr ""
+msgstr "Write Cache instellingen"
 
 msgid "WriteCache"
-msgstr ""
+msgstr "WriteCache"
 
 msgid "auto"
-msgstr ""
+msgstr "autom."
 
 msgid "persistent (disk)"
-msgstr ""
+msgstr "persistent (schijf)"
 
 msgid "tmpfs size"
-msgstr ""
+msgstr "tmpfs-grootte"
 
 msgid "volatile (RAM)"
-msgstr ""
+msgstr "vluchtig (RAM)"
