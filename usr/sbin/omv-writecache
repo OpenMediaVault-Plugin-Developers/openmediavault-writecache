@@ -6,8 +6,6 @@
 # License version 2. This program is licensed "as is" without any
 # warranty of any kind, whether express or implied.
 #
-# version: 0.0.7
-#
 import os, sys, subprocess, time, re, shutil
 import pwd, grp
 import atexit, signal
@@ -19,7 +17,7 @@ try:
 except Exception:
     yaml = None
 
-SCRIPT_VERSION = "0.0.7"
+SCRIPT_VERSION = "0.0.8"
 CONFIG = Path("/etc/omv-writecache/config.yaml")
 TMPFS_MOUNT = Path("/run/omv-writecache")
 LOG_FILE = "/var/log/omv-writecache.log"
@@ -101,6 +99,7 @@ def release_lock():
             pass
     except Exception as e:
         log(f"Lock release error: {e}", "WARN")
+
 def handle_signal(signum, frame):
     # Handle termination signals to release the lock properly
     print(f"Received signal {signum}, cleaning up...")
@@ -110,16 +109,21 @@ def handle_signal(signum, frame):
 def lower_bind_for(name: str) -> Path:
     return TMPFS_MOUNT / name / "lower"
 
-def is_mountpoint(path: Path) -> bool:
+def get_mounts() -> list[dict]:
+    mounts = []
     try:
         with open("/proc/mounts") as f:
             for line in f:
                 parts = line.split()
-                if len(parts) >= 2 and parts[1] == str(path):
-                    return True
-    except Exception:
-        pass
-    return False
+                if len(parts) >= 4:
+                    mounts.append({"device": parts[0], "path": parts[1], "fstype": parts[2], "opts": parts[3]})
+    except Exception as e:
+        log(f"Failed to read /proc/mounts: {e}", "WARN")
+    return mounts
+
+def is_mountpoint(path: Path) -> bool:
+    mounts = get_mounts()
+    return any(m["path"] == str(path) for m in mounts)
 
 def wait_for_unmount(path: Path, timeout: int = 10) -> bool:
     """Wait for a path to be unmounted, with timeout"""
@@ -282,13 +286,9 @@ def ensure_tmpfs(size):
 def sanitize_name(p):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", p.strip("/"))
 
-def is_overlay_mounted(path: Path):
-    with open("/proc/mounts") as f:
-        for line in f:
-            parts = line.split()
-            if len(parts) >= 3 and parts[1] == str(path):
-                return parts[2] == "overlay"
-    return False
+def is_overlay_mounted(path: Path) -> bool:
+    mounts = get_mounts()
+    return any(m["path"] == str(path) and m["fstype"] == "overlay" for m in mounts)
 
 def find_bad_specials(upper_dir: Path):
     bad = []
@@ -676,6 +676,21 @@ def cmd_unmount():
         flush(cfg)
     unmount(cfg)
 
+def cmd_status():
+    log("STATUS_CMD: Starting status command")
+    mounts = get_mounts()
+    writecache_mounts = [m for m in mounts if m["fstype"] == "tmpfs" and m["path"] == str(TMPFS_MOUNT) or
+                        (m["fstype"] == "overlay" and "upperdir=/run/omv-writecache/" in m["opts"])]
+    if not writecache_mounts:
+        print("No writecache mounts found")
+        log("STATUS: No writecache mounts found")
+        return
+    print(f"{'Mount Point':<30} {'Type':<10} {'Options'}")
+    print("-" * 60)
+    for m in writecache_mounts:
+        print(f"{m['path']:<30} {m['fstype']:<10} {m['opts']}")
+    log(f"STATUS: Found {len(writecache_mounts)} writecache mounts")
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: omv-writecache [mount|rotateflush|flush|unmount|remount|status]")
@@ -710,27 +725,7 @@ def main():
         cmd_unmount()
         cmd_mount()
     elif cmd == "status":
-        log("STATUS_CMD: Starting status command")
-        lines = []
-        with open("/proc/mounts") as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) < 4:
-                    continue
-                device, mnt, fstype, opts = parts[0], parts[1], parts[2], parts[3]
-                # Base tmpfs for writecache
-                if fstype == "tmpfs" and mnt == "/run/omv-writecache":
-                    lines.append(line.strip())
-                    continue
-                # Overlay mounts created by writecache
-                if fstype == "overlay" and "upperdir=/run/omv-writecache/" in opts:
-                    lines.append(line.strip())
-        if lines:
-            print("\n".join(lines))
-            log(f"STATUS: Found {len(lines)} writecache mounts")
-        else:
-            print("No writecache mounts found")
-            log("STATUS: No writecache mounts found")
+        cmd_status()
     else:
         log(f"UNKNOWN_CMD: {cmd}", "ERROR")
         print("Unknown command")
