@@ -1,3 +1,15 @@
+openmediavault-writecache (8.0.2) UNRELEASED; urgency=medium
+
+  * Add postfix tests to test script
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Fri, 12 Dec 2025 00:09:08 +0000
+
+openmediavault-writecache (8.0.1) unstable; urgency=low
+
+  * Enable by default
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Sun, 07 Dec 2025 20:17:16 +0000
+
 openmediavault-writecache (8.0.0-13) unstable; urgency=low
 
   * Initial release

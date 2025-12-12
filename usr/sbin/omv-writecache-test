@@ -58,6 +58,73 @@ def run_sh(cmd, timeout: int = 20):
     except Exception as e:
         return (False, "", str(e))
 
+def postfix_available() -> bool:
+    """Return True if postfix binary is present."""
+    return shutil.which("postfix") is not None
+
+def postfix_unit_disabled() -> bool:
+    """
+    Return True if the postfix systemd unit is explicitly disabled.
+    """
+    ok, out, err = run_sh(["systemctl", "is-enabled", "postfix"], timeout=5)
+    state = (out or "").strip()
+    return state == "disabled"
+
+def check_postfix(stage: str) -> tuple[bool, str]:
+    """
+    Check Postfix health after a given stage (mount/flush/unmount/baseline).
+
+    We treat as 'healthy' if:
+      - postfix is not installed, OR
+      - postfix systemd unit is disabled (explicitly skipped), OR
+      - postfix status / postqueue / postfix check all succeed.
+    """
+    if postfix_unit_disabled():
+        msg = "Postfix systemd unit is disabled; skipping postfix checks."
+        log_test(msg + f" (stage={stage})", "WARN")
+        return True, msg
+
+    overall_ok = True
+    messages: list[str] = []
+
+    # 1) postfix status
+    ok_status, out_status, err_status = run_sh(["postfix", "status"], timeout=10)
+    msg_status = (out_status or err_status or "").strip()
+    if ok_status:
+        log_test(f"[Postfix] status OK after {stage}: {msg_status}", "SUCCESS")
+    else:
+        log_test(f"[Postfix] status FAILED after {stage}: {msg_status}", "FAIL")
+        overall_ok = False
+    messages.append(f"status: {'OK' if ok_status else 'FAIL'} ({msg_status})")
+
+    # 2) postqueue -p (queue listing)
+    ok_queue, out_queue, err_queue = run_sh(["postqueue", "-p"], timeout=15)
+    msg_queue = (out_queue or err_queue or "").strip()
+    if ok_queue:
+        log_test(f"[Postfix] queue listing OK after {stage}", "SUCCESS")
+    else:
+        log_test(f"[Postfix] queue listing FAILED after {stage}: {msg_queue}", "FAIL")
+        overall_ok = False
+    messages.append(f"queue: {'OK' if ok_queue else 'FAIL'}")
+
+    # 3) postfix check (config/files/spool sanity)
+    ok_check, out_check, err_check = run_sh(["postfix", "check"], timeout=20)
+    msg_check = (out_check or err_check or "").strip()
+    if ok_check:
+        log_test(f"[Postfix] check OK after {stage}", "SUCCESS")
+    else:
+        log_test(f"[Postfix] check FAILED after {stage}: {msg_check}", "FAIL")
+        overall_ok = False
+    messages.append(f"check: {'OK' if ok_check else 'FAIL'} ({msg_check})")
+
+    summary = "; ".join(messages)
+    if overall_ok:
+        log_test(f"Postfix health OK after {stage}: {summary}", "SUCCESS")
+    else:
+        log_test(f"Postfix health FAILED after {stage}: {summary}", "FAIL")
+
+    return overall_ok, summary
+
 def journal_has(tag: str, needle: str, since_epoch: float | None = None, until_epoch: float | None = None) -> bool:
     args = ["journalctl", "-b", "-t", tag, "--no-pager"]
     if since_epoch is not None:
@@ -1112,9 +1179,17 @@ class WriteCacheTest:
             "empty_directories": False,
             "long_filenames": False,
             "unicode_filenames": False,
+            "postfix_baseline": False,
+            "postfix_after_mount": False,
+            "postfix_after_flush": False,
+            "postfix_after_unmount": False,
         }
 
         try:
+            # Baseline Postfix health before any mount/flush/unmount
+            log_test("\n>>> Test 0: postfix baseline", "INFO")
+            results["postfix_baseline"], _ = check_postfix("baseline")
+
             # Mount
             log_test("\n>>> Test 1: mount", "INFO")
             ok, _ = run_cmd("mount")
@@ -1130,6 +1205,9 @@ class WriteCacheTest:
                 else:
                     log_test(f"Overlay NOT mounted: {path}", "FAIL")
                     results["mount"] = False
+
+            # Check Postfix after mount
+            results["postfix_after_mount"], _ = check_postfix("mount")
 
             # Create files inside overlays
             log_test("\n>>> Test 2: create files", "INFO")
@@ -1154,6 +1232,9 @@ class WriteCacheTest:
                 results["flush"] = results["flush"] and still_ok
                 log_test("Flush verify: " + ("OK" if still_ok else "FAIL"),
                          "SUCCESS" if still_ok else "FAIL")
+
+            # Check Postfix after flush
+            results["postfix_after_flush"], _ = check_postfix("flush")
 
             # Delete files (whiteout behavior)
             log_test("\n>>> Test 5: delete files", "INFO")
@@ -1193,6 +1274,9 @@ class WriteCacheTest:
                 results["persistence"] = persisted_ok
                 log_test("Persistence after unmount (per policy): " + ("OK" if persisted_ok else "FAIL"),
                          "SUCCESS" if persisted_ok else "FAIL")
+
+                # Check Postfix after unmount
+                results["postfix_after_unmount"], _ = check_postfix("unmount")
 
             log_test("\n>>> Cleanup", "INFO")
             self.delete_test_files(tag="t1")
