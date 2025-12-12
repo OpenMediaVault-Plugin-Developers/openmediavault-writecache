@@ -9,7 +9,7 @@ xpath="/config/services/${svc}"
 
 if ! omv_config_exists "${xpath}"; then
   omv_config_add_node "/config/services" "${svc}"
-  omv_config_add_key "${xpath}" "enable" "0"
+  omv_config_add_key "${xpath}" "enable" "1"
   omv_config_add_key "${xpath}" "tmpfs_size" "25%"
   omv_config_add_key "${xpath}" "journald_storage" "auto"
   omv_config_add_key "${xpath}" "flush_on_shutdown" "1"
