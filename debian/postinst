@@ -23,7 +23,7 @@ case "$1" in
       omv-confdbadm migrate "conf.service.writecache" "${2}"
     fi
 
-    omv-salt deploy run --quiet writecache
+    omv-salt deploy run --quiet --no-color writecache || :
   ;;
 
   abort-upgrade|abort-remove|abort-deconfigure)
