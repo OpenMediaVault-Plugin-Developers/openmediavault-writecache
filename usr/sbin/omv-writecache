@@ -25,6 +25,8 @@ LOG_FILE = "/var/log/omv-writecache.log"
 LOCK_FILE = None
 ARRAY_LOCK = None
 
+NO_FLUSH = False
+
 def log(msg: str, level: str = "INFO"):
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"{ts} - {msg}")
@@ -688,7 +690,9 @@ def cmd_flush():
 def cmd_unmount():
     log("UNMOUNT_CMD: Starting unmount command")
     cfg = load_config()
-    if cfg.get("flush_on_shutdown", True):
+    if NO_FLUSH:
+        log("PRE_UNMOUNT_FLUSH: skipped (--no-flush)", "WARN")
+    elif cfg.get("flush_on_shutdown", True):
         log("PRE_UNMOUNT_FLUSH: Flushing before unmount")
         flush(cfg)
     unmount(cfg)
@@ -710,10 +714,26 @@ def cmd_status():
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: omv-writecache [mount|rotateflush|flush|unmount|remount|status]")
+        print(
+            "Usage: omv-writecache <command> [--no-flush]\n"
+            "Commands:\n"
+            "  mount\n"
+            "  rotateflush\n"
+            "  flush\n"
+            "  unmount [--no-flush]\n"
+            "  remount\n"
+            "  status"
+        )
         sys.exit(2)
 
-    cmd = sys.argv[1]
+    global NO_FLUSH
+
+    args = sys.argv[1:]
+    cmd = args[0]
+
+    if "--no-flush" in args:
+        NO_FLUSH = True
+        args.remove("--no-flush")
 
     if cmd in ["-v", "--version", "version"]:
         print(SCRIPT_VERSION)
