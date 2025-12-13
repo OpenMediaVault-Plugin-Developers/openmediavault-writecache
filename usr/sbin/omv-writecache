@@ -24,6 +24,7 @@ LOG_FILE = "/var/log/omv-writecache.log"
 
 LOCK_FILE = None
 ARRAY_LOCK = None
+_LOCK_FD = None
 
 NO_FLUSH = False
 
@@ -232,11 +233,11 @@ def ensure_persistent_journal():
                             mid = ""
                         if mid:
                             mid_dir = os.path.join(journal_dir, mid)
-                            if not os.path.isdir(journal_dir):
+                            if not os.path.isdir(mid_dir):
                                 log(f"MIDDIR: {mid_dir} not found. Creating", "DEBUG")
                                 os.makedirs(mid_dir, exist_ok=True)
-                            os.chown(journal_dir, 0, gid)
-                            os.chmod(journal_dir, 0o2755)
+                            os.chown(mid_dir, 0, gid)
+                            os.chmod(mid_dir, 0o2755)
                     break
 
 def journalctl_rotate_sync():
@@ -347,13 +348,14 @@ def clear_overlay_opq_and_whiteouts(upper_dir: Path) -> int:
         if opq.exists():
             opq.unlink(missing_ok=True)
             removed += 1
-        # Remove xattr if set
+
+        # Remove xattr if it exists
         try:
-            import os
-            os.setxattr(str(upper_dir), b"trusted.overlay.opaque", b"")
-            # if above doesn't clear on your Python, fallback to setfattr via run()
-        except Exception:
-            run(["setfattr", "-x", "trusted.overlay.opaque", str(upper_dir)], check=False)
+            os.removexattr(str(upper_dir), "trusted.overlay.opaque")
+            removed += 1
+        except (OSError, AttributeError):
+            # OSError means attribute doesn't exist or not supported - both OK
+            pass
 
         # Remove per-file whiteouts directly under this dir
         for p in upper_dir.glob(".wh*"):
@@ -483,7 +485,6 @@ def rsync_upper_to_lower(upper_dir, lower_dir):
     ]
     proc = run(args, check=False, quiet=True)
     output = proc.stdout or ""
-    error = proc.stderr or ""
     transferred = 0
     total_bytes = None
 
@@ -514,7 +515,7 @@ def rsync_upper_to_lower(upper_dir, lower_dir):
         # Partial/vanished files — OK for log dirs and ephemeral paths
         log(f"RSYNC_WARN({proc.returncode}): {upper_dir} -> {lower_dir} (partial/vanished files)", "WARN")
         return True
-    log(f"RSYNC_FAILED: exit {proc.returncode} ({error.strip()})", "ERROR")
+    log(f"RSYNC_FAILED: exit {proc.returncode} ({output.strip()})", "ERROR")
     return False
 
 
