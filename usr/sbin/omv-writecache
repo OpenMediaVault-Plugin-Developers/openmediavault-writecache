@@ -158,6 +158,21 @@ def force_unmount_with_retry(path: Path, max_retries: int = 3) -> bool:
 
     return False
 
+def mounts_under(prefix: Path) -> list[Path]:
+    prefix_str = str(prefix).rstrip("/") + "/"
+    pts = []
+    for m in get_mounts():
+        mp = m["path"]
+        if mp == str(prefix) or mp.startswith(prefix_str):
+            pts.append(Path(mp))
+    # deepest-first so children go away before parents
+    return sorted(pts, key=lambda p: len(str(p)), reverse=True)
+
+def unmount_all_under_tmpfs():
+    for mp in mounts_under(TMPFS_MOUNT):
+        log(f"WORKSPACE_UNMOUNT: {mp}")
+        force_unmount_with_retry(mp)
+
 def ensure_lower_bind(real_path: Path, name: str) -> Path:
     lower = lower_bind_for(name)
     lower.mkdir(parents=True, exist_ok=True)
@@ -551,7 +566,7 @@ def flush(cfg):
             remount_lower(lower, rw=True)
 
             # scrub before syncing (whiteouts/opaque markers)
-            changed, bad = scrub_bad_specials(str(upper))
+            changed, bad = scrub_bad_specials(upper)
             opq_removed = 0
             try:
                 opq_removed = clear_overlay_opq_and_whiteouts(upper)
@@ -644,14 +659,16 @@ def unmount(cfg):
             log(f"LOWER_UNMOUNT: {lower}")
             force_unmount_with_retry(lower)
 
-    # 3) drop tmpfs if nothing is using it
-    with open("/proc/mounts") as f:
-        mounts = f.read()
-    if f" {TMPFS_MOUNT} tmpfs " in mounts:
+    # 3) aggressively unmount anything still mounted under TMPFS_MOUNT
+    unmount_all_under_tmpfs()
+
+    # 4) now drop tmpfs
+    if is_mountpoint(TMPFS_MOUNT):
         log(f"TMPFS_UNMOUNT: {TMPFS_MOUNT}")
         force_unmount_with_retry(TMPFS_MOUNT)
     else:
         log(f"TMPFS_NOT_MOUNTED: {TMPFS_MOUNT}", "DEBUG")
+
     log("UNMOUNT_COMPLETE: Finished")
 
 def cmd_mount():
