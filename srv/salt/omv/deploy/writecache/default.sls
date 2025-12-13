@@ -143,9 +143,9 @@ omv-writecache-flush_service:
         [Unit]
         Description=OMV WriteCache: flush overlay changes to disk
         DefaultDependencies=no
-        Before=umount.target systemd-journal-flush.service
-        Wants=umount.target
-        Conflicts=umount.target
+        Before=umount.target
+        Before=systemd-journal-flush.service
+        RequiresMountsFor=/run/omv-writecache
 
         [Service]
         Type=oneshot
