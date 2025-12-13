@@ -1,3 +1,10 @@
+openmediavault-writecache (8.0.3) unstable; urgency=low
+
+  * Improve shutdown unmounts
+  * Add --no-flush option to unmount
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Sat, 13 Dec 2025 01:57:15 +0000
+
 openmediavault-writecache (8.0.2) unstable; urgency=low
 
   * Add postfix tests to test script
