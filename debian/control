@@ -8,9 +8,12 @@ Homepage: https://github.com/OpenMediaVault-Plugin-Developers
 
 Package: openmediavault-writecache
 Architecture: all
-Depends: openmediavault (>= 7.7.17),
+Depends: openmediavault (>= 8),
          jq,
          ${misc:Depends}
+Conflicts: openmediavault-flashmemory, folder2ram
+Breaks: openmediavault-flashmemory, folder2ram
+Replaces: openmediavault-flashmemory
 Description: openmediavault plugin to reduce OS writes using tmpfs+overlayfs
  Provides an overlay-based write cache for selected system directories
  (e.g., /var/log, APT caches) using tmpfs as the upperdir. Changes can be
