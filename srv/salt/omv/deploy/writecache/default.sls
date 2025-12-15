@@ -96,10 +96,10 @@ omv-writecache-setup_service:
         [Unit]
         Description=OMV WriteCache: mount overlays (tmpfs upper) for selected paths
         DefaultDependencies=no
-        After=systemd-remount-fs.service
-        Before=systemd-tmpfiles-setup.service systemd-journald.service local-fs.target postfix@-.service
+        After=systemd-remount-fs.service local-fs-pre.target tmp.mount
+        Before=systemd-tmpfiles-setup.service systemd-journald.service local-fs.target postfix@-.service shutdown.target
         RequiresMountsFor=/var
-        Wants=tmp.mount
+        Requires=tmp.mount
         Conflicts=shutdown.target
 
         [Service]
@@ -110,6 +110,7 @@ omv-writecache-setup_service:
 {%- endif %}
         ExecStop=/usr/sbin/omv-writecache unmount
         RemainAfterExit=yes
+        TimeoutStopSec=300
 
         [Install]
         WantedBy=sysinit.target
