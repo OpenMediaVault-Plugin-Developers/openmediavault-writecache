@@ -101,36 +101,11 @@ omv-writecache-setup_service:
         [Service]
         Type=oneshot
         ExecStart=/usr/sbin/omv-writecache mount
+        ExecStop=/usr/sbin/omv-writecache unmount
         RemainAfterExit=yes
 
         [Install]
         WantedBy=sysinit.target
-    - user: root
-    - group: root
-    - mode: 0644
-
-
-omv-writecache-teardown_service:
-  file.managed:
-    - name: "/etc/systemd/system/omv-writecache-teardown.service"
-    - contents: |
-        [Unit]
-        Description=OMV WriteCache: flush + unmount overlays at shutdown
-        DefaultDependencies=no
-        Before=umount.target shutdown.target
-        Conflicts=shutdown.target
-        After=network.target
-        After=systemd-journald.service
-        After=rsyslog.service
-
-        [Service]
-        Type=oneshot
-        ExecStart=/usr/sbin/omv-writecache unmount
-        TimeoutStartSec=300
-        RemainAfterExit=yes
-
-        [Install]
-        WantedBy=shutdown.target
     - user: root
     - group: root
     - mode: 0644
@@ -166,7 +141,6 @@ writecache_systemctl_daemon_reload:
     - name: service.systemctl_reload
     - onchanges:
       - file: omv-writecache-setup_service
-      - file: omv-writecache-teardown_service
       - file: omv-writecache-flush_service
 
 {% if config.enable | to_bool %}
@@ -178,22 +152,11 @@ writecache_setup_service_enable:
     - require:
       - file: omv-writecache-setup_service
 
-writecache_teardown_service_enable:
-  service.enabled:
-    - name: omv-writecache-teardown.service
-    - require:
-      - file: omv-writecache-teardown_service
-
 {% else %}
 
 writecache_setup_service_disable:
   service.dead:
     - name: omv-writecache-setup.service
-    - enable: False
-
-writecache_teardown_service_disable:
-  service.dead:
-    - name: omv-writecache-teardown.service
     - enable: False
 
 {% endif %}

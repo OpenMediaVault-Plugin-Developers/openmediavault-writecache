@@ -1,3 +1,9 @@
+openmediavault-writecache (8.0.6) unstable; urgency=low
+
+  * Improve shutdown
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Mon, 15 Dec 2025 14:32:40 +0000
+
 openmediavault-writecache (8.0.5) unstable; urgency=low
 
   * Improve upgrades from OMV 7
