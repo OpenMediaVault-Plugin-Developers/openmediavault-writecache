@@ -8,6 +8,4 @@ systemctl disable --now omv-writecache-teardown.service 2>/dev/null || true
 rm -f /etc/systemd/system/omv-writecache-teardown.service
 systemctl daemon-reload
 
-omv-salt deploy run --quiet --no-color writecache
-
 exit 0

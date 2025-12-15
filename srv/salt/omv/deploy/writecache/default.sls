@@ -84,10 +84,14 @@ restart_journald_on_change:
     - onchanges:
       - file: configure_writecache_journald
 
+{% set shutdown_action = None %}
+{% if config.flush_on_shutdown | to_bool %}
+{% set shutdown_action = 'rotateflush' if (config.rotate_on_shutdown | to_bool) else 'flush' %}
+{% endif %}
 
 omv-writecache-setup_service:
   file.managed:
-    - name: "/etc/systemd/system/omv-writecache-setup.service"
+    - name: /etc/systemd/system/omv-writecache-setup.service
     - contents: |
         [Unit]
         Description=OMV WriteCache: mount overlays (tmpfs upper) for selected paths
@@ -101,6 +105,9 @@ omv-writecache-setup_service:
         [Service]
         Type=oneshot
         ExecStart=/usr/sbin/omv-writecache mount
+{%- if shutdown_action %}
+        ExecStop=/usr/sbin/omv-writecache {{ shutdown_action }}
+{%- endif %}
         ExecStop=/usr/sbin/omv-writecache unmount
         RemainAfterExit=yes
 
@@ -108,40 +115,13 @@ omv-writecache-setup_service:
         WantedBy=sysinit.target
     - user: root
     - group: root
-    - mode: 0644
-
-
-omv-writecache-flush_service:
-  file.managed:
-    - name: "/etc/systemd/system/omv-writecache-flush.service"
-    - contents: |
-        [Unit]
-        Description=OMV WriteCache: flush overlay changes to disk
-        DefaultDependencies=no
-        Before=umount.target
-        Before=systemd-journal-flush.service
-        RequiresMountsFor=/run/omv-writecache
-
-        [Service]
-        Type=oneshot
-{%- if config.rotate_on_shutdown | to_bool %}
-        ExecStart=/usr/sbin/omv-writecache rotateflush
-{%- else %}
-        ExecStart=/usr/sbin/omv-writecache flush
-{%- endif %}
-
-        [Install]
-        WantedBy=umount.target
-    - user: root
-    - group: root
-    - mode: 0644
+    - mode: '0644'
 
 writecache_systemctl_daemon_reload:
   module.run:
     - name: service.systemctl_reload
     - onchanges:
       - file: omv-writecache-setup_service
-      - file: omv-writecache-flush_service
 
 {% if config.enable | to_bool %}
 
@@ -158,22 +138,6 @@ writecache_setup_service_disable:
   service.dead:
     - name: omv-writecache-setup.service
     - enable: False
-
-{% endif %}
-
-{% if config.enable | to_bool and config.flush_on_shutdown | to_bool %}
-
-writecache_flush_service_enable:
-  service.enabled:
-    - name: omv-writecache-flush.service
-    - require:
-      - file: omv-writecache-flush_service
-
-{% else %}
-
-writecache_flush_service_disable:
-  service.disabled:
-    - name: omv-writecache-flush.service
 
 {% endif %}
 

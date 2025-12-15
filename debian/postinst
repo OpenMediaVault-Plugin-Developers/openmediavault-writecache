@@ -10,12 +10,6 @@ case "$1" in
     # Activate package triggers.
     dpkg-trigger update-workbench
 
-    timer="/etc/systemd/system/omv-writecache-flush.timer"
-    if [ -f "${timer}" ]; then
-      rm -f "${timer}"
-      systemctl daemon-reload
-    fi
-
     # Initialize and migrate configuration database.
     echo "Updating configuration database ..."
     omv-confdbadm create "conf.service.writecache"
