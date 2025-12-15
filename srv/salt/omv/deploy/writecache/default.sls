@@ -179,9 +179,8 @@ writecache_setup_service_enable:
       - file: omv-writecache-setup_service
 
 writecache_teardown_service_enable:
-  service.running:
+  service.enabled:
     - name: omv-writecache-teardown.service
-    - enable: True
     - require:
       - file: omv-writecache-teardown_service
 
