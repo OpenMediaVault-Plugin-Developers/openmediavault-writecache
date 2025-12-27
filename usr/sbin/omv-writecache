@@ -801,7 +801,7 @@ def cmd_df():
 
     items = list(parse_paths(cfg.get("paths", "")))
 
-    print(f"{'Target':<42} {'Overlay':<7} {'Lower':<5} {'Upper Used':>10}  {'Upper Dir'}")
+    print(f"{'Target':<42} {'Overlay':<7}  {'Lower':<5}  {'Upper Used':>10}  {'Upper Dir'}")
     print("-" * 110)
 
     # tmpfs line
@@ -818,16 +818,16 @@ def cmd_df():
             pass
 
         print(
-            f"{str(TMPFS_MOUNT):<42} "
-            f"{'tmpfs':<7} {'-':<5} "
+            f"{str(TMPFS_MOUNT):<42}  "
+            f"{'tmpfs':<7}  {'-':<5} "
             f"{bytes_to_human(used):>10}  "
             f"size={bytes_to_human(total)} avail={bytes_to_human(avail)} use%={usepct}%"
         )
     else:
         print(
-            f"{str(TMPFS_MOUNT):<42} "
-            f"{'NO':<7} {'-':<5} "
-            f"{'-':>10}  "
+            f"{str(TMPFS_MOUNT):<42}  "
+            f"{'NO':<7}  {'-':<5} "
+            f"{'-':>10}   "
             f"(not mounted)"
         )
 
@@ -846,8 +846,8 @@ def cmd_df():
             upper_used = bytes_to_human(dir_size_bytes(upper))
 
         print(
-            f"{str(p):<42} "
-            f"{overlay_yes:<7} {lower_yes:<5} "
+            f"{str(p):<42}  "
+            f"{overlay_yes:<7}  {lower_yes:<5} "
             f"{upper_used:>10}  "
             f"{str(upper)}"
         )

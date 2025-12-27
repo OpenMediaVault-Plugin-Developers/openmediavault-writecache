@@ -38,6 +38,12 @@ class OMVRpcServiceWriteCache extends \OMV\Rpc\ServiceAbstract
         // Get the configuration object.
         $db = \OMV\Config\Database::getInstance();
         $object = $db->get("conf.service.writecache");
+        $cmdLine = 'omv-writecache df';
+        $cmd = new \OMV\System\Process($cmdLine);
+        $cmd->setQuiet(true);
+        $output = [];
+        $cmd->execute($output, $exitStatus);
+        $object->add('status', 'string', implode(PHP_EOL, $output));
         return $object->getAssoc();
     }
 
