@@ -27,8 +27,11 @@ ARRAY_LOCK = None
 _LOCK_FD = None
 
 NO_FLUSH = False
+LOG_ENABLED = True
 
 def log(msg: str, level: str = "INFO"):
+    if not LOG_ENABLED:
+        return
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"{ts} - {msg}")
     try:
@@ -127,6 +130,89 @@ def get_mounts() -> list[dict]:
 def is_mountpoint(path: Path) -> bool:
     mounts = get_mounts()
     return any(m["path"] == str(path) for m in mounts)
+
+def bytes_to_human(n: int) -> str:
+    if n is None:
+        return "-"
+    n = int(n)
+    units = ["B", "K", "M", "G", "T", "P", "E"]
+    f = float(n)
+    for u in units:
+        if f < 1024.0 or u == units[-1]:
+            if u == "B":
+                return f"{int(f)}B"
+            return f"{f:.1f}{u}"
+        f /= 1024.0
+    return f"{n}B"
+
+def dir_size_bytes(path: Path) -> int:
+    """Best-effort size of directory contents (regular files + symlinks), in bytes."""
+    total = 0
+    try:
+        if not path.exists():
+            return 0
+        for root, dirs, files in os.walk(path, topdown=True, followlinks=False):
+            for name in files:
+                p = Path(root) / name
+                try:
+                    st = os.lstat(p)
+                    total += st.st_size
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    continue
+    except Exception:
+        return 0
+    return total
+
+def human_bytes(n: int) -> str:
+    units = ["B", "K", "M", "G", "T", "P"]
+    f = float(n)
+    for u in units:
+        if f < 1024.0 or u == units[-1]:
+            if u == "B":
+                return f"{int(f)}{u}"
+            return f"{f:.1f}{u}"
+        f /= 1024.0
+    return f"{f:.1f}P"
+
+def statvfs_usage(path: Path):
+    """Return (size, used, avail, pct_used) for the filesystem containing path."""
+    st = os.statvfs(str(path))
+    size = st.f_frsize * st.f_blocks
+    avail = st.f_frsize * st.f_bavail
+    used = size - (st.f_frsize * st.f_bfree)
+    pct = int(round((used / size) * 100)) if size > 0 else 0
+    return size, used, avail, pct
+
+def du_bytes(path: Path) -> int:
+    """Fast byte usage for a directory. Uses `du -sb` when possible, else walks."""
+    try:
+        res = subprocess.run(
+            ["du", "-sb", str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        if res.returncode == 0 and res.stdout:
+            # "<bytes>\t<path>"
+            return int(res.stdout.split()[0])
+    except Exception:
+        pass
+
+    total = 0
+    try:
+        for root, dirs, files in os.walk(path, topdown=True):
+            for name in files:
+                p = Path(root) / name
+                try:
+                    st = os.lstat(p)
+                    total += st.st_size
+                except FileNotFoundError:
+                    pass
+    except Exception:
+        pass
+    return total
 
 def wait_for_unmount(path: Path, timeout: int = 10) -> bool:
     """Wait for a path to be unmounted, with timeout"""
@@ -699,19 +785,73 @@ def cmd_unmount():
     unmount(cfg)
 
 def cmd_status():
-    log("STATUS_CMD: Starting status command")
     mounts = get_mounts()
     writecache_mounts = [m for m in mounts if m["fstype"] == "tmpfs" and m["path"] == str(TMPFS_MOUNT) or
                         (m["fstype"] == "overlay" and "upperdir=/run/omv-writecache/" in m["opts"])]
     if not writecache_mounts:
         print("No writecache mounts found")
-        log("STATUS: No writecache mounts found")
         return
     print(f"{'Mount Point':<30} {'Type':<10} {'Options'}")
     print("-" * 60)
     for m in writecache_mounts:
         print(f"{m['path']:<30} {m['fstype']:<10} {m['opts']}")
-    log(f"STATUS: Found {len(writecache_mounts)} writecache mounts")
+
+def cmd_df():
+    cfg = load_config()
+
+    items = list(parse_paths(cfg.get("paths", "")))
+
+    print(f"{'Target':<42} {'Overlay':<7} {'Lower':<5} {'Upper Used':>10}  {'Upper Dir'}")
+    print("-" * 110)
+
+    # tmpfs line
+    if is_mountpoint(TMPFS_MOUNT):
+        used = avail = total = 0
+        usepct = 0
+        try:
+            du = shutil.disk_usage(str(TMPFS_MOUNT))
+            total = du.total
+            used = du.used
+            avail = du.free
+            usepct = int(round((used / total) * 100)) if total > 0 else 0
+        except Exception:
+            pass
+
+        print(
+            f"{str(TMPFS_MOUNT):<42} "
+            f"{'tmpfs':<7} {'-':<5} "
+            f"{bytes_to_human(used):>10}  "
+            f"size={bytes_to_human(total)} avail={bytes_to_human(avail)} use%={usepct}%"
+        )
+    else:
+        print(
+            f"{str(TMPFS_MOUNT):<42} "
+            f"{'NO':<7} {'-':<5} "
+            f"{'-':>10}  "
+            f"(not mounted)"
+        )
+
+    # per-path lines
+    for path, mode in items:
+        p = Path(path).resolve()
+        name = sanitize_name(str(p))
+        lower = lower_bind_for(name)
+        upper = TMPFS_MOUNT / name / "upper"
+
+        overlay_yes = "YES" if is_overlay_mounted(p) else "NO"
+        lower_yes = "YES" if is_mountpoint(lower) else "NO"
+
+        upper_used = "-"
+        if upper.exists():
+            upper_used = bytes_to_human(dir_size_bytes(upper))
+
+        print(
+            f"{str(p):<42} "
+            f"{overlay_yes:<7} {lower_yes:<5} "
+            f"{upper_used:>10}  "
+            f"{str(upper)}"
+        )
+
 
 def main():
     if len(sys.argv) < 2:
@@ -723,11 +863,14 @@ def main():
             "  flush\n"
             "  unmount [--no-flush]\n"
             "  remount\n"
-            "  status"
+            "  status\n"
+            "  df\n"
+            "  version"
         )
         sys.exit(2)
 
     global NO_FLUSH
+    global LOG_ENABLED
 
     args = sys.argv[1:]
     cmd = args[0]
@@ -736,19 +879,29 @@ def main():
         NO_FLUSH = True
         args.remove("--no-flush")
 
+    # Identify commands that should not lock and should not log
+    no_lock_no_log_cmds = {"df", "status", "version", "-v", "--version"}
+    mutating_cmds = {"mount", "rotateflush", "flush", "unmount", "remount"}
+
+    # Disable logging entirely for df/status/version so there is no dated output
+    if cmd in no_lock_no_log_cmds:
+        LOG_ENABLED = False
+
+    # version output (no root, no lock)
     if cmd in ["-v", "--version", "version"]:
         print(SCRIPT_VERSION)
         sys.exit(0)
 
-    if os.geteuid() != 0:
+    # Non-mutating commands can run without root
+    if cmd in mutating_cmds and os.geteuid() != 0:
         print("This tool must be run as root", file=sys.stderr)
         sys.exit(1)
 
-    check_and_create_lock("omv-writecache")
-    if cmd in ["mount","rotateflush","flush","unmount","remount"]:
+    # Lock only for mutating commands
+    if cmd in mutating_cmds:
+        check_and_create_lock("omv-writecache")
         ensure_persistent_journal()
-
-    log(f"SCRIPT_START: omv-writecache {cmd}")
+        log(f"SCRIPT_START: omv-writecache {cmd}")
 
     if cmd == "mount":
         cmd_mount()
@@ -764,15 +917,16 @@ def main():
         cmd_mount()
     elif cmd == "status":
         cmd_status()
+    elif cmd == "df":
+        cmd_df()
     else:
-        log(f"UNKNOWN_CMD: {cmd}", "ERROR")
+        if cmd in mutating_cmds:
+            log(f"UNKNOWN_CMD: {cmd}", "ERROR")
         print("Unknown command")
         sys.exit(2)
 
-    log(f"SCRIPT_END: omv-writecache {cmd}")
-
-    if cmd in ["mount","rotateflush","flush","unmount","remount"]:
-        # release lock
+    if cmd in mutating_cmds:
+        log(f"SCRIPT_END: omv-writecache {cmd}")
         release_lock()
 
 
