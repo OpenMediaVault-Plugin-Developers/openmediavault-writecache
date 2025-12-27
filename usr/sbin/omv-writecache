@@ -17,7 +17,7 @@ try:
 except Exception:
     yaml = None
 
-SCRIPT_VERSION = "0.0.8"
+SCRIPT_VERSION = "0.0.9"
 CONFIG = Path("/etc/omv-writecache/config.yaml")
 TMPFS_MOUNT = Path("/run/omv-writecache")
 LOG_FILE = "/var/log/omv-writecache.log"
@@ -131,19 +131,51 @@ def is_mountpoint(path: Path) -> bool:
     mounts = get_mounts()
     return any(m["path"] == str(path) for m in mounts)
 
-def bytes_to_human(n: int) -> str:
+def fmt_bytes(n: int) -> str:
+    # human-friendly (base-2)
     if n is None:
         return "-"
-    n = int(n)
     units = ["B", "K", "M", "G", "T", "P", "E"]
-    f = float(n)
+    v = float(n)
     for u in units:
-        if f < 1024.0 or u == units[-1]:
+        if v < 1024.0 or u == units[-1]:
             if u == "B":
-                return f"{int(f)}B"
-            return f"{f:.1f}{u}"
-        f /= 1024.0
-    return f"{n}B"
+                return f"{int(v)}B"
+            return f"{v:.1f}{u}"
+        v /= 1024.0
+    return f"{v:.1f}P"
+
+def get_dir_size_bytes(path: Path) -> int:
+    total = 0
+    try:
+        res = subprocess.run(["du", "-sb", str(path)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        if res.returncode == 0 and res.stdout:
+            return int(res.stdout.split()[0])
+    except Exception:
+        pass
+
+    # fallback walk
+    try:
+        for root, dirs, files in os.walk(path, topdown=True):
+            for name in files:
+                p = Path(root) / name
+                try:
+                    st = os.lstat(p)
+                    total += st.st_size
+                except FileNotFoundError:
+                    continue
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return total
+
+def is_tmpfs_workspace_mounted() -> bool:
+    # ensure it's actually tmpfs mounted at TMPFS_MOUNT
+    for m in get_mounts():
+        if m["path"] == str(TMPFS_MOUNT) and m["fstype"] == "tmpfs":
+            return True
+    return False
 
 def dir_size_bytes(path: Path) -> int:
     """Best-effort size of directory contents (regular files + symlinks), in bytes."""
@@ -163,55 +195,6 @@ def dir_size_bytes(path: Path) -> int:
                     continue
     except Exception:
         return 0
-    return total
-
-def human_bytes(n: int) -> str:
-    units = ["B", "K", "M", "G", "T", "P"]
-    f = float(n)
-    for u in units:
-        if f < 1024.0 or u == units[-1]:
-            if u == "B":
-                return f"{int(f)}{u}"
-            return f"{f:.1f}{u}"
-        f /= 1024.0
-    return f"{f:.1f}P"
-
-def statvfs_usage(path: Path):
-    """Return (size, used, avail, pct_used) for the filesystem containing path."""
-    st = os.statvfs(str(path))
-    size = st.f_frsize * st.f_blocks
-    avail = st.f_frsize * st.f_bavail
-    used = size - (st.f_frsize * st.f_bfree)
-    pct = int(round((used / size) * 100)) if size > 0 else 0
-    return size, used, avail, pct
-
-def du_bytes(path: Path) -> int:
-    """Fast byte usage for a directory. Uses `du -sb` when possible, else walks."""
-    try:
-        res = subprocess.run(
-            ["du", "-sb", str(path)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        if res.returncode == 0 and res.stdout:
-            # "<bytes>\t<path>"
-            return int(res.stdout.split()[0])
-    except Exception:
-        pass
-
-    total = 0
-    try:
-        for root, dirs, files in os.walk(path, topdown=True):
-            for name in files:
-                p = Path(root) / name
-                try:
-                    st = os.lstat(p)
-                    total += st.st_size
-                except FileNotFoundError:
-                    pass
-    except Exception:
-        pass
     return total
 
 def wait_for_unmount(path: Path, timeout: int = 10) -> bool:
@@ -785,12 +768,37 @@ def cmd_unmount():
     unmount(cfg)
 
 def cmd_status():
-    mounts = get_mounts()
-    writecache_mounts = [m for m in mounts if m["fstype"] == "tmpfs" and m["path"] == str(TMPFS_MOUNT) or
-                        (m["fstype"] == "overlay" and "upperdir=/run/omv-writecache/" in m["opts"])]
-    if not writecache_mounts:
-        print("No writecache mounts found")
+    cfg = load_config()
+
+    tmpfs_ok = is_tmpfs_workspace_mounted()
+    if not tmpfs_ok:
+        print(f"WriteCache: INACTIVE - {TMPFS_MOUNT} is not mounted (tmpfs workspace missing).")
+        print("Overlays cannot be active without the workspace.")
         return
+
+    # workspace is up; now see if any overlays are mounted
+    items = list(parse_paths(cfg.get("paths", "")))
+    active = 0
+    for path, _mode in items:
+        p = Path(path).resolve()
+        if is_overlay_mounted(p):
+            active += 1
+
+    print(f"WriteCache: ACTIVE - {TMPFS_MOUNT} is mounted.")
+    print(f"Overlays mounted: {active}/{len(items)}")
+
+    # keep the existing detailed listing, but only when workspace exists
+    mounts = get_mounts()
+    writecache_mounts = [m for m in mounts if (
+        (m["fstype"] == "tmpfs" and m["path"] == str(TMPFS_MOUNT)) or
+        (m["fstype"] == "overlay" and "upperdir=/run/omv-writecache/" in m["opts"])
+    )]
+
+    if not writecache_mounts:
+        print("No writecache mounts found (unexpected if workspace is mounted).")
+        return
+
+    print()
     print(f"{'Mount Point':<30} {'Type':<10} {'Options'}")
     print("-" * 60)
     for m in writecache_mounts:
@@ -798,59 +806,39 @@ def cmd_status():
 
 def cmd_df():
     cfg = load_config()
-
     items = list(parse_paths(cfg.get("paths", "")))
+
+    tmpfs_ok = is_tmpfs_workspace_mounted()
 
     print(f"{'Target':<42} {'Overlay':<7}  {'Lower':<5}  {'Upper Used':>10}  {'Upper Dir'}")
     print("-" * 110)
 
-    # tmpfs line
-    if is_mountpoint(TMPFS_MOUNT):
-        used = avail = total = 0
-        usepct = 0
-        try:
-            du = shutil.disk_usage(str(TMPFS_MOUNT))
-            total = du.total
-            used = du.used
-            avail = du.free
-            usepct = int(round((used / total) * 100)) if total > 0 else 0
-        except Exception:
-            pass
+    # /run/omv-writecache line
+    if tmpfs_ok:
+        du = shutil.disk_usage(str(TMPFS_MOUNT))
+        used = fmt_bytes(du.used)
+        total = fmt_bytes(du.total)
+        free = fmt_bytes(du.free)
+        pct = int((du.used * 100) / du.total) if du.total else 0
+        print(f"{str(TMPFS_MOUNT):<42} {'tmpfs':<7}  {'-':<5}  {used:>10}  size={total} avail={free} use%={pct}%")
 
-        print(
-            f"{str(TMPFS_MOUNT):<42}  "
-            f"{'tmpfs':<7}  {'-':<5} "
-            f"{bytes_to_human(used):>10}  "
-            f"size={bytes_to_human(total)} avail={bytes_to_human(avail)} use%={usepct}%"
-        )
+        # per-path lines
+        for path, mode in items:
+            p = Path(path).resolve()
+            name = sanitize_name(str(p))
+            lower = lower_bind_for(name)
+            upper = TMPFS_MOUNT / name / "upper"
+
+            overlay = "YES" if is_overlay_mounted(p) else "NO"
+            lower_ok = "YES" if is_mountpoint(lower) else "NO"
+
+            upper_used = "-"
+            if upper.exists():
+                upper_used = fmt_bytes(get_dir_size_bytes(upper))
+
+            print(f"{str(p):<42} {overlay:<7}  {lower_ok:<5}  {upper_used:>10}  {upper}")
     else:
-        print(
-            f"{str(TMPFS_MOUNT):<42}  "
-            f"{'NO':<7}  {'-':<5} "
-            f"{'-':>10}   "
-            f"(not mounted)"
-        )
-
-    # per-path lines
-    for path, mode in items:
-        p = Path(path).resolve()
-        name = sanitize_name(str(p))
-        lower = lower_bind_for(name)
-        upper = TMPFS_MOUNT / name / "upper"
-
-        overlay_yes = "YES" if is_overlay_mounted(p) else "NO"
-        lower_yes = "YES" if is_mountpoint(lower) else "NO"
-
-        upper_used = "-"
-        if upper.exists():
-            upper_used = bytes_to_human(dir_size_bytes(upper))
-
-        print(
-            f"{str(p):<42}  "
-            f"{overlay_yes:<7}  {lower_yes:<5} "
-            f"{upper_used:>10}  "
-            f"{str(upper)}"
-        )
+        print(f"{str(TMPFS_MOUNT):<42} {'NO':<7}  {'-':<5}  {'-':>10}  NOT MOUNTED")
 
 
 def main():
