@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Copyright (c) 2025 openmediavault plugin developers
+# Copyright (c) 2025-2026 openmediavault plugin developers
 #
 # This file is licensed under the terms of the GNU General Public
 # License version 2. This program is licensed "as is" without any
@@ -17,10 +17,31 @@ try:
 except Exception:
     yaml = None
 
-SCRIPT_VERSION = "0.0.9"
+SCRIPT_VERSION = "0.0.10"
 CONFIG = Path("/etc/omv-writecache/config.yaml")
 TMPFS_MOUNT = Path("/run/omv-writecache")
-LOG_FILE = "/var/log/omv-writecache.log"
+
+DEFAULT_LOG_FILE = "/var/log/omv-writecache.log"
+DEFAULTS_FILE = "/etc/default/omv-writecache"
+
+def get_log_file():
+    log_file = DEFAULT_LOG_FILE
+    if os.path.exists(DEFAULTS_FILE):
+        try:
+            with open(DEFAULTS_FILE, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.startswith("OMV_WRITECACHE_LOG="):
+                        _, value = line.split("=", 1)
+                        log_file = value.strip().strip('"').strip("'")
+        except Exception:
+            pass
+
+    return log_file
+
+LOG_FILE = get_log_file()
 
 LOCK_FILE = None
 ARRAY_LOCK = None
@@ -755,7 +776,7 @@ def cmd_flush():
     log("FLUSH_CMD: Starting flush command")
     cfg = load_config()
     ok = flush(cfg)
-    sys.exit(0 if ok else 1)
+    return ok
 
 def cmd_unmount():
     log("UNMOUNT_CMD: Starting unmount command")
