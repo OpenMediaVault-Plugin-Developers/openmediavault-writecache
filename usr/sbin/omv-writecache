@@ -17,9 +17,19 @@ try:
 except Exception:
     yaml = None
 
-SCRIPT_VERSION = "0.0.10"
+SCRIPT_VERSION = "0.1.0"
 CONFIG = Path("/etc/omv-writecache/config.yaml")
-TMPFS_MOUNT = Path("/run/omv-writecache")
+
+# Workspace root for overlay metadata (lower binds, upperdirs, workdirs).
+# Default behavior uses a tmpfs at /run/omv-writecache (mounted by this tool).
+# You can instead point this to a persistent path (e.g. a data disk) by setting:
+#   workspace_type: path
+#   workspace_root: /srv/dev-disk-by-uuid-.../omv-writecache
+#
+# IMPORTANT: overlayfs requires upperdir and workdir be on the same filesystem.
+
+# Backwards-compatible constant name; actual workspace root is derived from config.
+DEFAULT_WORKSPACE_ROOT = Path("/run/omv-writecache")
 
 DEFAULT_LOG_FILE = "/var/log/omv-writecache.log"
 DEFAULTS_FILE = "/etc/default/omv-writecache"
@@ -133,8 +143,16 @@ def handle_signal(signum, frame):
     sys.exit(1)
 
 
-def lower_bind_for(name: str) -> Path:
-    return TMPFS_MOUNT / name / "lower"
+def get_workspace_type(cfg: dict) -> str:
+    t = str(cfg.get("workspace_type", "tmpfs")).strip().lower()
+    return t if t in ("tmpfs", "path") else "tmpfs"
+
+def get_workspace_root(cfg: dict) -> Path:
+    p = str(cfg.get("workspace_root", str(DEFAULT_WORKSPACE_ROOT))).strip() or str(DEFAULT_WORKSPACE_ROOT)
+    return Path(p)
+
+def lower_bind_for(workspace_root: Path, name: str) -> Path:
+    return workspace_root / name / "lower"
 
 def get_mounts() -> list[dict]:
     mounts = []
@@ -191,12 +209,46 @@ def get_dir_size_bytes(path: Path) -> int:
         pass
     return total
 
-def is_tmpfs_workspace_mounted() -> bool:
-    # ensure it's actually tmpfs mounted at TMPFS_MOUNT
+def is_tmpfs_mounted_at(path: Path) -> bool:
+    # ensure it's actually tmpfs mounted at path
     for m in get_mounts():
-        if m["path"] == str(TMPFS_MOUNT) and m["fstype"] == "tmpfs":
+        if m["path"] == str(path) and m["fstype"] == "tmpfs":
             return True
     return False
+
+def ensure_workspace(cfg: dict) -> Path:
+    """Ensure workspace root exists and (when configured) is mounted."""
+    ws_type = get_workspace_type(cfg)
+    ws_root = get_workspace_root(cfg)
+
+    if ws_type == "tmpfs":
+        ws_root.mkdir(parents=True, exist_ok=True)
+        if is_tmpfs_mounted_at(ws_root):
+            log(f"WORKSPACE_EXISTS: {ws_root}")
+            return ws_root
+        size = cfg.get("tmpfs_size", "25%")
+        log(f"WORKSPACE_MOUNT: tmpfs {ws_root} size={size}")
+        run(["mount", "-t", "tmpfs", "-o", f"size={size},mode=0755", "tmpfs", str(ws_root)])
+        return ws_root
+
+    # ws_type == "path"
+    ws_root.mkdir(parents=True, exist_ok=True)
+    try:
+        testfile = ws_root / ".writecache_test"
+        testfile.write_text("ok")
+        testfile.unlink(missing_ok=True)
+    except Exception as e:
+        log(f"WORKSPACE_NOT_WRITABLE: {ws_root}: {e}", "ERROR")
+        raise SystemExit(1)
+    return ws_root
+
+def is_workspace_ready(cfg: dict) -> bool:
+    ws_root = get_workspace_root(cfg)
+    ws_type = get_workspace_type(cfg)
+    if ws_type == "tmpfs":
+        return is_tmpfs_mounted_at(ws_root)
+    # path
+    return ws_root.exists() and os.access(str(ws_root), os.W_OK)
 
 def dir_size_bytes(path: Path) -> int:
     """Best-effort size of directory contents (regular files + symlinks), in bytes."""
@@ -261,13 +313,13 @@ def mounts_under(prefix: Path) -> list[Path]:
     # deepest-first so children go away before parents
     return sorted(pts, key=lambda p: len(str(p)), reverse=True)
 
-def unmount_all_under_tmpfs():
-    for mp in mounts_under(TMPFS_MOUNT):
+def unmount_all_under_workspace(workspace_root: Path):
+    for mp in mounts_under(workspace_root):
         log(f"WORKSPACE_UNMOUNT: {mp}")
         force_unmount_with_retry(mp)
 
-def ensure_lower_bind(real_path: Path, name: str) -> Path:
-    lower = lower_bind_for(name)
+def ensure_lower_bind(workspace_root: Path, real_path: Path, name: str) -> Path:
+    lower = lower_bind_for(workspace_root, name)
     lower.mkdir(parents=True, exist_ok=True)
     if not is_mountpoint(lower):
         run(["mount", "--bind", str(real_path), str(lower)], check=False)
@@ -341,7 +393,10 @@ def journalctl_rotate_sync():
 def load_config():
     defaults = {
         "enable": True,
+        "workspace_type": "tmpfs",  # tmpfs | path
+        "workspace_root": str(DEFAULT_WORKSPACE_ROOT),
         "tmpfs_size": "25%",
+        "flush_on_boot": False,
         "journald_storage": "volatile",
         "flush_on_shutdown": True,
         "flush_daily": False,
@@ -380,16 +435,6 @@ def parse_paths(paths_text):
             res.append((p, mode))
             seen.add(p)
     return res
-
-def ensure_tmpfs(size):
-    TMPFS_MOUNT.mkdir(parents=True, exist_ok=True)
-    with open("/proc/mounts") as f:
-        mounts = f.read()
-    if f" {TMPFS_MOUNT} tmpfs " in mounts:
-        log(f"TMPFS_EXISTS: {TMPFS_MOUNT}")
-        return
-    log(f"TMPFS_MOUNT: {TMPFS_MOUNT} size={size}")
-    run(["mount", "-t", "tmpfs", "-o", f"size={size},mode=0755", "tmpfs", str(TMPFS_MOUNT)])
 
 def sanitize_name(p):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", p.strip("/"))
@@ -458,23 +503,120 @@ def clear_overlay_opq_and_whiteouts(upper_dir: Path) -> int:
         pass
     return removed
 
+def upper_has_content(upper_dir: Path) -> bool:
+    """True if upper_dir contains any entries (including .wh.* markers)."""
+    try:
+        if not upper_dir.exists():
+            return False
+        with os.scandir(upper_dir) as it:
+            for _ in it:
+                return True
+    except Exception:
+        pass
+    return False
+
+def flush_pending_on_boot(cfg: dict, workspace_root: Path):
+    """Flush any pending upperdirs found in a persistent workspace before mounting overlays.
+
+    This is intended for workspace_type: path, where upper/work survive reboots.
+    """
+    log(f"BOOT_FLUSH_START: Checking persistent workspace for pending changes under {workspace_root}")
+    errors = 0
+
+    for path, mode in parse_paths(cfg.get("paths", "")):
+        # Only flush modes that are intended to write back.
+        if mode not in ("flush", "persist", "writeback"):
+            continue
+        p = Path(path).resolve()
+        name = sanitize_name(str(p))
+        upper = workspace_root / name / "upper"
+        work = workspace_root / name / "work"
+
+        if not upper_has_content(upper):
+            continue
+
+        log(f"BOOT_FLUSH_PENDING: {p} upper={upper}")
+        try:
+            lower = lower_bind_for(workspace_root, name)
+            if not is_mountpoint(lower):
+                lower = ensure_lower_bind(workspace_root, p, name)
+
+            ok = False
+            try:
+                remount_lower(lower, rw=True)
+
+                changed, bad = scrub_bad_specials(upper)
+                opq_removed = 0
+                try:
+                    opq_removed = clear_overlay_opq_and_whiteouts(upper)
+                except Exception:
+                    pass
+                if changed or opq_removed:
+                    log(f"SCRUBBED_UPPER: specials={len(bad)} opq_removed={opq_removed} under {upper}")
+
+                ok = rsync_upper_to_lower(str(upper), str(lower))
+            finally:
+                try:
+                    remount_lower(lower, rw=False)
+                except Exception as e2:
+                    errors += 1
+                    log(f"LOWER_RO_RESTORE_FAILED: {lower} - {e2}", "ERROR")
+
+            if ok:
+                try:
+                    try:
+                        clear_overlay_opq_and_whiteouts(upper)
+                    except Exception:
+                        pass
+                    clear_upper_dir(str(upper))
+                except Exception as e:
+                    errors += 1
+                    log(f"BOOT_FLUSH_CLEAR_UPPER_FAILED: {upper} - {e}", "ERROR")
+
+                # Recreate workdir to keep overlayfs happy
+                try:
+                    if work.exists():
+                        shutil.rmtree(work, ignore_errors=True)
+                    work.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    errors += 1
+                    log(f"BOOT_FLUSH_RECREATE_WORKDIR_FAILED: {work} - {e}", "ERROR")
+            else:
+                errors += 1
+                log(f"BOOT_FLUSH_FAILED: {p}", "ERROR")
+        except Exception as e:
+            errors += 1
+            log(f"BOOT_FLUSH_ERROR: {p} - {e}", "ERROR")
+
+    if errors:
+        log(f"BOOT_FLUSH_COMPLETE: {errors} errors", "ERROR")
+    else:
+        log("BOOT_FLUSH_COMPLETE: Success", "INFO")
+
 def mount_overlays(cfg):
     if not cfg.get("enable", True):
         log("DISABLED: WriteCache disabled", "WARN")
         return
-    ensure_tmpfs(cfg.get("tmpfs_size", "25%"))
+    ws_root = ensure_workspace(cfg)
+    ws_type = get_workspace_type(cfg)
+
+    # Optional: flush pending workspace data before mounting overlays (useful only
+    # when workspace is persistent).
+    if cfg.get("flush_on_boot", False) and ws_type == "path":
+        flush_pending_on_boot(cfg, ws_root)
+
     for path, mode in parse_paths(cfg.get("paths", "")):
         p = Path(path).resolve()
         # Do not allow overlay targets inside our workspace (e.g., lower/upper/work)
-        if str(p).startswith(str(TMPFS_MOUNT) + "/") or str(p) == str(TMPFS_MOUNT):
+        if str(p).startswith(str(ws_root) + "/") or str(p) == str(ws_root):
             log(f"SKIP_WORKSPACE_PATH: refusing to overlay {p}", "ERROR")
             continue
         if not p.exists():
             log(f"SKIP_MISSING: {p}", "WARN")
             continue
         name = sanitize_name(str(p))
-        upper = TMPFS_MOUNT / name / "upper"
-        work = TMPFS_MOUNT / name / "work"
+        upper = ws_root / name / "upper"
+        work = ws_root / name / "work"
         upper.mkdir(parents=True, exist_ok=True)
         work.mkdir(parents=True, exist_ok=True)
         changed, bad = scrub_bad_specials(upper)
@@ -484,7 +626,7 @@ def mount_overlays(cfg):
             log(f"ALREADY_MOUNTED: {p}")
             continue
         # Use a bind of the real path as the overlay's lowerdir
-        lower = ensure_lower_bind(p, name)
+        lower = ensure_lower_bind(ws_root, p, name)
         # If something mounted overlay on the lower bind path, tear it down
         if is_overlay_mounted(lower):
             log(f"FIXUP: overlay was mounted on lower bind {lower}; unmounting", "ERROR")
@@ -627,6 +769,10 @@ def clear_upper_dir(upper_dir: str):
 
 def flush(cfg):
     log("FLUSH_START: Beginning flush operation")
+    ws_root = get_workspace_root(cfg)
+    if not is_workspace_ready(cfg):
+        log(f"WORKSPACE_NOT_READY: {ws_root} (cannot flush)", "ERROR")
+        return False
     errors = 0
     for path, mode in parse_paths(cfg.get("paths", "")):
         if mode not in ("flush", "persist", "writeback"):
@@ -635,15 +781,15 @@ def flush(cfg):
 
         p = Path(path).resolve()
         name = sanitize_name(str(p))
-        upper = TMPFS_MOUNT / name / "upper"
-        work = TMPFS_MOUNT / name / "work"
+        upper = ws_root / name / "upper"
+        work = ws_root / name / "work"
         if not upper.exists():
             log(f"NO_UPPER: {p}", "DEBUG")
             continue
 
-        lower = lower_bind_for(name)
+        lower = lower_bind_for(ws_root, name)
         if not is_mountpoint(lower):
-            lower = ensure_lower_bind(p, name)
+            lower = ensure_lower_bind(ws_root, p, name)
 
         # Unmount overlay so lower changes are seen on remount
         if is_overlay_mounted(p):
@@ -729,11 +875,13 @@ def flush(cfg):
 
 def unmount(cfg):
     log("UNMOUNT_START: Beginning unmount operation")
+    ws_root = get_workspace_root(cfg)
+    ws_type = get_workspace_type(cfg)
     items = list(parse_paths(cfg.get("paths","")))
     # 1) remove any overlay mounted ON the lower bind
     for path, _ in items:
         name = sanitize_name(str(Path(path).resolve()))
-        lower = lower_bind_for(name)
+        lower = lower_bind_for(ws_root, name)
         if is_overlay_mounted(lower):
             log(f"LOWER_OVERLAY_UNMOUNT: {lower}")
             force_unmount_with_retry(lower)
@@ -742,7 +890,7 @@ def unmount(cfg):
     paths = [Path(p).resolve() for p, _ in items]
     for p in sorted(paths, key=lambda x: len(str(x)), reverse=True):
         name = sanitize_name(str(p))
-        lower = lower_bind_for(name)
+        lower = lower_bind_for(ws_root, name)
         if is_overlay_mounted(p):
             log(f"UNMOUNT: {p}")
             force_unmount_with_retry(p)
@@ -752,15 +900,16 @@ def unmount(cfg):
             log(f"LOWER_UNMOUNT: {lower}")
             force_unmount_with_retry(lower)
 
-    # 3) aggressively unmount anything still mounted under TMPFS_MOUNT
-    unmount_all_under_tmpfs()
+    # 3) aggressively unmount anything still mounted under the workspace root
+    unmount_all_under_workspace(ws_root)
 
-    # 4) now drop tmpfs
-    if is_mountpoint(TMPFS_MOUNT):
-        log(f"TMPFS_UNMOUNT: {TMPFS_MOUNT}")
-        force_unmount_with_retry(TMPFS_MOUNT)
-    else:
-        log(f"TMPFS_NOT_MOUNTED: {TMPFS_MOUNT}", "DEBUG")
+    # 4) if workspace is a tmpfs that we mounted, unmount it
+    if ws_type == "tmpfs":
+        if is_mountpoint(ws_root):
+            log(f"WORKSPACE_UNMOUNT_ROOT: {ws_root}")
+            force_unmount_with_retry(ws_root)
+        else:
+            log(f"WORKSPACE_ROOT_NOT_MOUNTED: {ws_root}", "DEBUG")
 
     log("UNMOUNT_COMPLETE: Finished")
 
@@ -776,7 +925,7 @@ def cmd_flush():
     log("FLUSH_CMD: Starting flush command")
     cfg = load_config()
     ok = flush(cfg)
-    return ok
+    sys.exit(0 if ok else 1)
 
 def cmd_unmount():
     log("UNMOUNT_CMD: Starting unmount command")
@@ -791,9 +940,14 @@ def cmd_unmount():
 def cmd_status():
     cfg = load_config()
 
-    tmpfs_ok = is_tmpfs_workspace_mounted()
-    if not tmpfs_ok:
-        print(f"WriteCache: INACTIVE - {TMPFS_MOUNT} is not mounted (tmpfs workspace missing).")
+    ws_root = get_workspace_root(cfg)
+    ws_type = get_workspace_type(cfg)
+
+    if not is_workspace_ready(cfg):
+        if ws_type == "tmpfs":
+            print(f"WriteCache: INACTIVE - {ws_root} is not mounted (tmpfs workspace missing).")
+        else:
+            print(f"WriteCache: INACTIVE - workspace path not available/writable: {ws_root}")
         print("Overlays cannot be active without the workspace.")
         return
 
@@ -805,14 +959,18 @@ def cmd_status():
         if is_overlay_mounted(p):
             active += 1
 
-    print(f"WriteCache: ACTIVE - {TMPFS_MOUNT} is mounted.")
+    if ws_type == "tmpfs":
+        print(f"WriteCache: ACTIVE - {ws_root} is mounted (tmpfs).")
+    else:
+        print(f"WriteCache: ACTIVE - workspace path is available: {ws_root}")
     print(f"Overlays mounted: {active}/{len(items)}")
 
     # keep the existing detailed listing, but only when workspace exists
     mounts = get_mounts()
+    ws_prefix = f"upperdir={str(ws_root).rstrip('/')}/"
     writecache_mounts = [m for m in mounts if (
-        (m["fstype"] == "tmpfs" and m["path"] == str(TMPFS_MOUNT)) or
-        (m["fstype"] == "overlay" and "upperdir=/run/omv-writecache/" in m["opts"])
+        (ws_type == "tmpfs" and m["fstype"] == "tmpfs" and m["path"] == str(ws_root)) or
+        (m["fstype"] == "overlay" and ws_prefix in m["opts"])
     )]
 
     if not writecache_mounts:
@@ -829,26 +987,28 @@ def cmd_df():
     cfg = load_config()
     items = list(parse_paths(cfg.get("paths", "")))
 
-    tmpfs_ok = is_tmpfs_workspace_mounted()
+    ws_root = get_workspace_root(cfg)
+    ws_type = get_workspace_type(cfg)
+    ready = is_workspace_ready(cfg)
 
     print(f"{'Target':<42} {'Overlay':<7}  {'Lower':<5}  {'Upper Used':>10}  {'Upper Dir'}")
     print("-" * 110)
 
-    # /run/omv-writecache line
-    if tmpfs_ok:
-        du = shutil.disk_usage(str(TMPFS_MOUNT))
+    # workspace line
+    if ready:
+        du = shutil.disk_usage(str(ws_root))
         used = fmt_bytes(du.used)
         total = fmt_bytes(du.total)
         free = fmt_bytes(du.free)
         pct = int((du.used * 100) / du.total) if du.total else 0
-        print(f"{str(TMPFS_MOUNT):<42} {'tmpfs':<7}  {'-':<5}  {used:>10}  size={total} avail={free} use%={pct}%")
+        print(f"{str(ws_root):<42} {ws_type:<7}  {'-':<5}  {used:>10}  size={total} avail={free} use%={pct}%")
 
         # per-path lines
         for path, mode in items:
             p = Path(path).resolve()
             name = sanitize_name(str(p))
-            lower = lower_bind_for(name)
-            upper = TMPFS_MOUNT / name / "upper"
+            lower = lower_bind_for(ws_root, name)
+            upper = ws_root / name / "upper"
 
             overlay = "YES" if is_overlay_mounted(p) else "NO"
             lower_ok = "YES" if is_mountpoint(lower) else "NO"
@@ -859,7 +1019,10 @@ def cmd_df():
 
             print(f"{str(p):<42} {overlay:<7}  {lower_ok:<5}  {upper_used:>10}  {upper}")
     else:
-        print(f"{str(TMPFS_MOUNT):<42} {'NO':<7}  {'-':<5}  {'-':>10}  NOT MOUNTED")
+        if ws_type == "tmpfs":
+            print(f"{str(ws_root):<42} {'NO':<7}  {'-':<5}  {'-':>10}  NOT MOUNTED")
+        else:
+            print(f"{str(ws_root):<42} {'NO':<7}  {'-':<5}  {'-':>10}  NOT AVAILABLE")
 
 
 def main():

@@ -15,11 +15,38 @@ data:
         name: enable
         label: _("Enabled")
         value: true
+      - type: checkbox
+        name: use_tmpfs
+        label: _("Use system memory")
+        value: true
+        hint: _("If checked, writecache will use system memory to store changes.<br/>If unchecked, writecache will store those changes in the selected shared folder. Changes are not lost if the system reboots or shuts down unexpectedly.")
+      - type: sharedFolderSelect
+        name: sharedfolderref
+        label: _("Workspace folder")
+        hint: _("Used to store temporary writecache changes.")
+        modifiers:
+          - type: visible
+            constraint:
+              operator: falsy
+              arg0:
+                prop: use_tmpfs
+          - type: value
+            typeConfig: ""
+            constraint:
+              operator: truthy
+              arg0:
+                prop: use_tmpfs
       - type: textInput
         name: tmpfs_size
         label: _("tmpfs size")
         value: "25%"
         hint: _("Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, 25%.")
+        modifiers:
+          - type: visible
+            constraint:
+              operator: truthy
+              arg0:
+                prop: use_tmpfs
       - type: select
         name: journald_storage
         label: _("Journal storage")
@@ -29,6 +56,21 @@ data:
             - ["auto", _("auto")]
             - ["volatile", _("volatile (RAM)")]
             - ["persistent", _("persistent (disk)")]
+      - type: checkbox
+        name: flush_on_boot
+        label: _("Flush on boot")
+        value: false
+        modifiers:
+          - type: visible
+            constraint:
+              operator: falsy
+              arg0:
+                prop: use_tmpfs
+          - type: unchecked
+            constraint:
+              operator: falsy
+              arg0:
+                prop: use_tmpfs
       - type: container
         fields:
           - type: checkbox

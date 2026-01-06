@@ -3,7 +3,7 @@ Upstream-Name: openmediavault-writecache
 Source: https://github.com/OpenMediaVault-Plugin-Developers/openmediavault-writecache
 
 Files: *
-Copyright: 2025 OpenMediaVault Plugin Developers
+Copyright: 2025-2026 OpenMediaVault Plugin Developers
 License: GPL-3+
  This program is free software: you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by

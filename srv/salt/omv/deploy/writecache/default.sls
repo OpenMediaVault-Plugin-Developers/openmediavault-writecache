@@ -1,6 +1,6 @@
 # @license   http://www.gnu.org/licenses/gpl.html GPL Version 3
 # @author    OpenMediaVault Plugin Developers <plugins@omv-extras.org>
-# @copyright Copyright (c) 2025 openmediavault plugin developers
+# @copyright Copyright (c) 2025-2026 openmediavault plugin developers
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -17,6 +17,32 @@
 
 {% set config = salt['omv_conf.get']('conf.service.writecache') %}
 
+{% set enabled = config.enable | to_bool %}
+{% set use_tmpfs = (config.use_tmpfs | to_bool) or (config.sharedfolderref == '') %}
+{% set tmpfs_size = config.tmpfs_size %}
+{% if use_tmpfs and (tmpfs_size in ['', '0%']) %}
+{%   set tmpfs_size = '25%' %}
+{% elif not use_tmpfs %}
+{%   set tmpfs_size = '0%' %}
+{% endif %}
+
+{% set workspace_type = 'tmpfs' if use_tmpfs else 'path' %}
+{% set workspace_root = '' if use_tmpfs else salt['omv_conf.get_sharedfolder_path'](config.sharedfolderref) %}
+
+{% set shutdown_action = None %}
+{% if config.flush_on_shutdown | to_bool %}
+{%   set shutdown_action = 'rotateflush' if (config.rotate_on_shutdown | to_bool) else 'flush' %}
+{% endif %}
+
+{% set daily_action = None %}
+{% if enabled and (config.flush_daily | to_bool) %}
+{%   set daily_action = 'rotateflush' if (config.rotate_on_daily_flush | to_bool) else 'flush' %}
+{% endif %}
+
+{% set unit_after  = 'systemd-remount-fs.service local-fs-pre.target' ~ (' tmp.mount' if use_tmpfs else '') %}
+{% set unit_before = 'local-fs.target systemd-journald.service postfix@-.service' ~ (' systemd-tmpfiles-setup.service' if use_tmpfs else '') %}
+
+
 php-fpm-tmpfiles-conf:
   file.managed:
     - name: /etc/tmpfiles.d/php-fpm.conf
@@ -28,20 +54,23 @@ php-fpm-tmpfiles-conf:
 
 configure_writecache_config_dir:
   file.directory:
-    - name: "/etc/omv-writecache"
+    - name: /etc/omv-writecache
     - user: root
     - group: root
     - mode: 0755
 
 configure_writecache_config:
   file.managed:
-    - name: "/etc/omv-writecache/config.yaml"
+    - name: /etc/omv-writecache/config.yaml
     - contents: |
         {{ pillar['headers']['auto_generated'] }}
         {{ pillar['headers']['warning'] }}
-        enable: {{ config.enable | to_bool }}
-        tmpfs_size: "{{ config.tmpfs_size }}"
+        enable: {{ enabled }}
+        workspace_type: {{ workspace_type }}
+        workspace_root: "{{ workspace_root }}"
+        tmpfs_size: "{{ tmpfs_size }}"
         journald_storage: "{{ config.journald_storage }}"
+        flush_on_boot: {{ config.flush_on_boot | to_bool }}
         flush_on_shutdown: {{ config.flush_on_shutdown | to_bool }}
         flush_daily: {{ config.flush_daily | to_bool }}
         paths: |
@@ -50,18 +79,18 @@ configure_writecache_config:
 {%- endfor %}
     - user: root
     - group: root
-    - mode: 644
+    - mode: 0644
 
 configure_writecache_journald_dir:
   file.directory:
-    - name: "/etc/systemd/journald.conf.d"
+    - name: /etc/systemd/journald.conf.d
     - user: root
     - group: root
     - dir_mode: 0755
 
 configure_writecache_journald:
   file.managed:
-    - name: "/etc/systemd/journald.conf.d/10-writecache.conf"
+    - name: /etc/systemd/journald.conf.d/10-writecache.conf
     - contents: |
         {{ pillar['headers']['auto_generated'] }}
         {{ pillar['headers']['warning'] }}
@@ -71,12 +100,7 @@ configure_writecache_journald:
     - group: root
     - mode: 0644
 
-reload_journald_on_change:
-  module.run:
-    - name: service.systemctl_reload
-    - onchanges:
-      - file: configure_writecache_journald
-
+{# One state is enough: reload journald when the conf changes #}
 restart_journald_on_change:
   service.running:
     - name: systemd-journald
@@ -84,35 +108,8 @@ restart_journald_on_change:
     - onchanges:
       - file: configure_writecache_journald
 
-{% set shutdown_action = None %}
-{% if config.flush_on_shutdown | to_bool %}
-{% set shutdown_action = 'rotateflush' if (config.rotate_on_shutdown | to_bool) else 'flush' %}
-{% endif %}
 
-{% if config.enable | to_bool %}
-
-run-omv-writecache_mount:
-  file.managed:
-    - name: /etc/systemd/system/run-omv\x2dwritecache.mount
-    - contents: |
-        [Unit]
-        Description=OMV WriteCache: tmpfs workspace at /run/omv-writecache
-        DefaultDependencies=no
-        After=systemd-remount-fs.service tmp.mount
-        Before=local-fs.target
-        Conflicts=umount.target
-
-        [Mount]
-        What=tmpfs
-        Where=/run/omv-writecache
-        Type=tmpfs
-        Options=size={{ config.tmpfs_size }},mode=0755
-
-        [Install]
-        WantedBy=sysinit.target
-    - user: root
-    - group: root
-    - mode: '0644'
+{% if enabled %}
 
 omv-writecache-setup_service:
   file.managed:
@@ -121,12 +118,9 @@ omv-writecache-setup_service:
         [Unit]
         Description=OMV WriteCache: overlays lifecycle
         DefaultDependencies=no
-        After=systemd-remount-fs.service local-fs-pre.target tmp.mount
-        Before=local-fs.target systemd-tmpfiles-setup.service systemd-journald.service postfix@-.service
-        Requires=run-omv\x2dwritecache.mount
-        After=run-omv\x2dwritecache.mount
+        After={{ unit_after }}
+        Before={{ unit_before }}
         RequiresMountsFor=/var
-        After=umount.target
         Conflicts=shutdown.target
 
         [Service]
@@ -148,37 +142,19 @@ omv-writecache-setup_service:
 
 {% else %}
 
-remove_run-omv-writecache_mount_unit:
-  file.absent:
-    - name: /etc/systemd/system/run-omv\x2dwritecache.mount
-
-remove_omv-writecache-setup_unit:
+omv-writecache-setup_service:
   file.absent:
     - name: /etc/systemd/system/omv-writecache-setup.service
 
 {% endif %}
 
-
 writecache_systemctl_daemon_reload:
   module.run:
     - name: service.systemctl_reload
     - onchanges:
-{%- if config.enable | to_bool %}
-      - file: run-omv-writecache_mount
       - file: omv-writecache-setup_service
-{%- else %}
-      - file: remove_run-omv-writecache_mount_unit
-      - file: remove_omv-writecache-setup_unit
-{%- endif %}
 
-{% if config.enable | to_bool %}
-
-writecache_mount_enable:
-  service.running:
-    - name: run-omv\x2dwritecache.mount
-    - enable: True
-    - require:
-      - file: run-omv-writecache_mount
+{% if enabled %}
 
 writecache_setup_service_enable:
   service.running:
@@ -186,14 +162,8 @@ writecache_setup_service_enable:
     - enable: True
     - require:
       - file: omv-writecache-setup_service
-      - service: writecache_mount_enable
 
 {% else %}
-
-writecache_mount_disable:
-  service.dead:
-    - name: run-omv\x2dwritecache.mount
-    - enable: False
 
 writecache_setup_service_disable:
   service.dead:
@@ -202,8 +172,8 @@ writecache_setup_service_disable:
 
 {% endif %}
 
-{% if config.enable | to_bool and config.flush_daily | to_bool %}
-{% set daily_action = 'rotateflush' if (config.rotate_on_daily_flush | to_bool) else 'flush' %}
+
+{% if daily_action %}
 
 omv_writecache_cron:
   file.managed:
@@ -218,7 +188,7 @@ omv_writecache_cron:
 
 {% else %}
 
-remove_writecache_cron:
+omv_writecache_cron:
   file.absent:
     - name: /etc/cron.d/omv-writecache
 

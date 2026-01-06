@@ -52,12 +52,20 @@ class OMVRpcServiceWriteCache extends \OMV\Rpc\ServiceAbstract
         // Validate the RPC caller context.
         $this->validateMethodContext($context, ["role" => OMV_ROLE_ADMINISTRATOR]);
         $db = \OMV\Config\Database::getInstance();
+        // fix paths
         $ppaths = str_replace([',',':'], PHP_EOL, $params['paths']);
         $paths = explode(PHP_EOL, $ppaths);
         $pathsT = array_map("trim", $paths);
         $pathsF = array_filter($pathsT);
         $pathsU = array_unique($pathsF);
         $params["paths"] = implode(PHP_EOL, $pathsU);
+        // fix disabled settings
+        if ($params['use_tmpfs']) {
+            $params['flush_on_boot'] = false;
+            $params['sharedfolderref'] = '';
+        } else {
+            $params['tmpfs_size'] = '0%';
+        }
         $object = $db->get("conf.service.writecache");
         $object->setAssoc($params);
         $db->set($object);

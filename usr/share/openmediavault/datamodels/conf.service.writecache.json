@@ -11,6 +11,23 @@
       "type": "boolean",
       "default": true
     },
+    "use_tmpfs": {
+      "type": "boolean",
+      "default": true
+    },
+    "sharedfolderref": {
+      "type": "string",
+      "oneOf": [
+        {
+          "type": "string",
+          "format": "uuidv4"
+        },
+        {
+          "type": "string",
+          "maxLength": 0
+        }
+      ]
+    },
     "tmpfs_size": {
       "type": "string",
       "default": "25%"
@@ -23,6 +40,10 @@
         "persistent"
       ],
       "default": "volatile"
+    },
+    "flush_on_boot": {
+      "type": "boolean",
+      "default": false
     },
     "flush_on_shutdown": {
       "type": "boolean",

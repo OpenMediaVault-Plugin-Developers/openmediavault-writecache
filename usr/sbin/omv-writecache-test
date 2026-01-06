@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Copyright (c) 2025 openmediavault plugin developers
+# Copyright (c) 2025-2026 openmediavault plugin developers
 #
 # This file is licensed under the terms of the GNU General Public
 # License version 2. This program is licensed "as is" without any
@@ -215,19 +215,35 @@ class CleanupTracker:
         self.directories.clear()
 
 # -------- Helpers --------
-def load_config_paths() -> Dict[str, str]:
+def load_config() -> dict:
+    """Load the omv-writecache YAML config and return it as a dict."""
+    if not CONFIG_PATH.exists():
+        raise RuntimeError(f"Config not found: {CONFIG_PATH}")
+    try:
+        import yaml
+        cfg = yaml.safe_load(CONFIG_PATH.read_text()) or {}
+        if not isinstance(cfg, dict):
+            raise RuntimeError("Config YAML root is not a mapping/object.")
+        return cfg
+    except Exception as e:
+        raise RuntimeError(f"Failed to read YAML config: {e}")
+
+def get_workspace_info(cfg: dict) -> Tuple[str, Path]:
+    """Return (workspace_type, workspace_root). Defaults match omv-writecache."""
+    ws_type = str(cfg.get("workspace_type", "tmpfs")).strip().lower()
+    if ws_type not in ("tmpfs", "path"):
+        ws_type = "tmpfs"
+    ws_root = Path(str(cfg.get("workspace_root", "/run/omv-writecache")).strip() or "/run/omv-writecache")
+    return ws_type, ws_root
+
+def load_config_paths(cfg: Optional[dict] = None) -> Dict[str, str]:
     """
     Read /etc/omv-writecache/config.yaml and return {path: policy}.
     Expects a 'paths' multi-line string with lines like: "/var/log = flush"
     """
-    if not CONFIG_PATH.exists():
-        raise RuntimeError(f"Config not found: {CONFIG_PATH}")
+    if cfg is None:
+        cfg = load_config()
 
-    try:
-        import yaml
-        cfg = yaml.safe_load(CONFIG_PATH.read_text())
-    except Exception as e:
-        raise RuntimeError(f"Failed to read YAML config: {e}")
 
     paths_block = cfg.get("paths", "") or ""
     result: Dict[str, str] = {}
@@ -314,22 +330,14 @@ def check_overlay_mounted(path: str) -> bool:
         pass
     return False
 
-def get_tmpfs_usage() -> Tuple[int, int]:
-    """Return (used_bytes, total_bytes) for the writecache tmpfs"""
+def get_workspace_usage(workspace_root: Path) -> Tuple[int, int]:
+    """Return (used_bytes, total_bytes) for the filesystem containing workspace_root."""
     try:
-        result = subprocess.run(
-            ["df", "-B1", "/run/omv-writecache"],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0:
-            lines = result.stdout.strip().split('\n')
-            if len(lines) >= 2:
-                parts = lines[1].split()
-                if len(parts) >= 3:
-                    return int(parts[2]), int(parts[1])
+        du = shutil.disk_usage(str(workspace_root))
+        return int(du.used), int(du.total)
     except Exception:
-        pass
-    return 0, 0
+        return 0, 0
+
 
 # -------- Test file helper --------
 class TestFile:
@@ -368,7 +376,9 @@ class TestFile:
 # -------- Test runner --------
 class WriteCacheTest:
     def __init__(self):
-        self.config_paths = load_config_paths()
+        self.cfg = load_config()
+        self.workspace_type, self.workspace_root = get_workspace_info(self.cfg)
+        self.config_paths = load_config_paths(self.cfg)
         self.test_files: Dict[str, List[TestFile]] = {}
         self.cleanup_tracker = CleanupTracker()
 
@@ -500,8 +510,12 @@ class WriteCacheTest:
             return False
 
     def test_disk_space_exhaustion(self) -> bool:
-        """Test behavior when tmpfs runs out of space"""
+        """Test behavior when workspace runs out of space"""
         log_test("\n>>> Test: disk space exhaustion", "INFO")
+
+        if self.workspace_type == "path":
+            log_test("Skip disk exhaustion test on workspace type path", "WARN")
+            return True  # Skip test
 
         # Find a writable path
         test_path = None
@@ -515,13 +529,13 @@ class WriteCacheTest:
             log_test("No suitable path for disk exhaustion test", "WARN")
             return True  # Skip test
 
-        used, total = get_tmpfs_usage()
+        used, total = get_workspace_usage(self.workspace_root)
         if total == 0:
-            log_test("Could not determine tmpfs size", "WARN")
+            log_test("Could not determine workspace filesystem size", "WARN")
             return True  # Skip test
 
         available = total - used
-        log_test(f"tmpfs available: {available / 1024 / 1024:.1f}MB", "DEBUG")
+        log_test(f"workspace available: {available / 1024 / 1024:.1f}MB", "DEBUG")
 
         # Try to fill most of available space (leave 5MB buffer)
         fill_size = max(0, available - 5 * 1024 * 1024)
@@ -804,7 +818,7 @@ class WriteCacheTest:
             return False
 
         # Check for expected mounts
-        has_tmpfs = "/run/omv-writecache" in output
+        has_workspace = "WriteCache: ACTIVE" in output
 
         # Count overlay mounts
         overlay_count = output.count("overlay")
@@ -812,9 +826,9 @@ class WriteCacheTest:
 
         count_ok = overlay_count >= expected_count  # May have more due to subdirs
 
-        log_test(f"Status: tmpfs={has_tmpfs}, overlays={overlay_count}>={expected_count}", "DEBUG")
+        log_test(f"Status: active={has_workspace}, overlays={overlay_count}>={expected_count}", "DEBUG")
 
-        result = has_tmpfs and count_ok
+        result = has_workspace and count_ok
         log_test(f"Status command test: {'OK' if result else 'FAIL'}",
                  "SUCCESS" if result else "FAIL")
         return result
@@ -835,9 +849,9 @@ class WriteCacheTest:
             return True
 
         # Check available space
-        used, total = get_tmpfs_usage()
+        used, total = get_workspace_usage(self.workspace_root)
         if total == 0:
-            log_test("Could not determine tmpfs size", "WARN")
+            log_test("Could not determine workspace filesystem size", "WARN")
             return True
 
         available = total - used
