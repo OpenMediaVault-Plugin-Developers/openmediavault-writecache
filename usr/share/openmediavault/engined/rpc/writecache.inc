@@ -67,6 +67,15 @@ class OMVRpcServiceWriteCache extends \OMV\Rpc\ServiceAbstract
             $params['tmpfs_size'] = '0%';
         }
         $object = $db->get("conf.service.writecache");
+        // check to see if use_tmpfs changed.
+        // run unmount if changed
+        $curTmpfs = $object->get('use_tmpfs');
+        $newTmpfs = $params['use_tmpfs'];
+        if ($curTmpfs != $newTmpfs) {
+            $cmd = new \OMV\System\Process('omv-writecache', 'unmount');
+            $cmd->setRedirect2to1();
+            $cmd->execute($output, $exitStatus);
+        }
         $object->setAssoc($params);
         $db->set($object);
         // Return the configuration object.
