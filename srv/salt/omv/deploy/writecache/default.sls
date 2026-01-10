@@ -120,22 +120,26 @@ omv-writecache-setup_service:
         DefaultDependencies=no
         After={{ unit_after }}
         Before={{ unit_before }}
+{%- if use_tmpfs %}
         RequiresMountsFor=/var
-        Conflicts=shutdown.target
+{%- else %}
+        RequiresMountsFor={{ workspace_root }}
+{%- endif %}
+        Conflicts=shutdown.target umount.target
+        Before=shutdown.target umount.target final.target
 
         [Service]
         Type=oneshot
         RemainAfterExit=yes
         ExecStart=/usr/sbin/omv-writecache mount
-{%- if shutdown_action %}
-        ExecStop=/usr/sbin/omv-writecache {{ shutdown_action }}
-{%- endif %}
         ExecStop=/usr/sbin/omv-writecache unmount
+        TimeoutStartSec=180
         TimeoutStopSec=300
         KillMode=none
+        SendSIGKILL=no
 
         [Install]
-        WantedBy=sysinit.target
+        WantedBy=local-fs.target
     - user: root
     - group: root
     - mode: '0644'

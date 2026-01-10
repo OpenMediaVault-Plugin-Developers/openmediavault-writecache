@@ -84,14 +84,14 @@ def check_and_create_lock(lockname):
     ARRAY_LOCK = lockname
 
     # Open (create if missing) and keep fd for the whole process
-    _LOCK_FD = os.open(LOCK_FILE, os.O_WRONLY | os.O_CREAT, 0o644)
+    _LOCK_FD = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o644)
     try:
         fcntl.flock(_LOCK_FD, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         # Someone else holds it; read PID for diagnostics if possible
         try:
             # Use pread to avoid seek races
-            owner_pid = os.read(_LOCK_FD, 32).decode('ascii').strip() or "unknown"
+            owner_pid = os.pread(_LOCK_FD, 32, 0).decode("ascii").strip() or "unknown"
         except Exception:
             owner_pid = "unknown"
         os.close(_LOCK_FD)
@@ -165,6 +165,56 @@ def get_mounts() -> list[dict]:
     except Exception as e:
         log(f"Failed to read /proc/mounts: {e}", "WARN")
     return mounts
+
+def findmnt_info(path: Path) -> dict:
+    """
+    Return dict with SOURCE, FSTYPE, OPTIONS for the given path using findmnt.
+    Best-effort: returns {} on failure.
+    """
+    try:
+        res = subprocess.run(
+            ["findmnt", "-no", "SOURCE,FSTYPE,OPTIONS", str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        if res.returncode != 0:
+            return {}
+        out = (res.stdout or "").strip()
+        if not out:
+            return {}
+        # findmnt prints: "<source> <fstype> <options>"
+        parts = out.split(None, 2)
+        if len(parts) < 2:
+            return {}
+        return {"source": parts[0], "fstype": parts[1], "opts": parts[2] if len(parts) > 2 else ""}
+    except Exception:
+        return {}
+
+def root_is_readonly() -> bool:
+    try:
+        res = subprocess.run(["findmnt", "-no", "OPTIONS", "/"],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        return res.returncode == 0 and "ro" in (res.stdout or "").strip().split(",")
+    except Exception:
+        return False
+
+def lower_bind_is_safe(lower: Path) -> bool:
+    """
+    A 'safe' lower bind is NOT an overlay mount and NOT sourced from 'overlay'.
+    (We expect something like /dev/XYZ[/var/log] on Debian, or a real path.)
+    """
+    info = findmnt_info(lower)
+    if not info:
+        return False
+    src = (info.get("source") or "").strip()
+    fst = (info.get("fstype") or "").strip()
+    if fst == "overlay":
+        return False
+    # Some systems show SOURCE literally as "overlay" for overlay mounts.
+    if src == "overlay":
+        return False
+    return True
 
 def is_mountpoint(path: Path) -> bool:
     mounts = get_mounts()
@@ -318,18 +368,48 @@ def unmount_all_under_workspace(workspace_root: Path):
         log(f"WORKSPACE_UNMOUNT: {mp}")
         force_unmount_with_retry(mp)
 
+def remount_lower(lower: Path, rw: bool, check: bool = False) -> bool:
+    """
+    IMPORTANT:
+      lower is a bind mount (mount --bind real_path -> lower).
+      Never do: mount -o remount,ro|rw <lower>
+        That can remount the *entire underlying filesystem* (e.g. /dev/vda1).
+      Always do: mount -o remount,bind,ro|rw <lower>
+        That only changes mountpoint flags.
+    """
+    if not is_mountpoint(lower):
+        log(f"REMOUNT_SKIPPED: not a mountpoint: {lower}", "ERROR")
+        if check:
+            raise SystemExit(32)
+        return False
+
+    mode = "rw" if rw else "ro"
+
+    # bind-only remount: modifies mount flags for the bind mount, not the superblock
+    res = run(["mount", "-o", f"remount,bind,{mode}", str(lower)], check=False)
+
+    if res.returncode != 0:
+        log(f"REMOUNT_FAILED: {lower} mode={mode} exit={res.returncode}", "ERROR")
+        run(["findmnt", "-no", "TARGET,SOURCE,FSTYPE,OPTIONS", str(lower)], check=False)
+        if check:
+            raise SystemExit(res.returncode)
+        return False
+
+    return True
+
 def ensure_lower_bind(workspace_root: Path, real_path: Path, name: str) -> Path:
     lower = lower_bind_for(workspace_root, name)
     lower.mkdir(parents=True, exist_ok=True)
-    if not is_mountpoint(lower):
-        run(["mount", "--bind", str(real_path), str(lower)], check=False)
-        run(["mount", "--make-private", str(lower)], check=False)
-    # Always force RO (even if it was already mounted)
-    remount_lower(lower, rw=False)
-    return lower
 
-def remount_lower(lower: Path, rw: bool):
-    run(["mount", "-o", f"remount,{'rw' if rw else 'ro'},bind", str(lower)], check=False)
+    if not is_mountpoint(lower):
+        res = run(["mount", "--bind", str(real_path), str(lower)], check=False)
+        if res.returncode != 0 or not is_mountpoint(lower):
+            log(f"LOWER_BIND_FAILED: {real_path} -> {lower}", "ERROR")
+            raise SystemExit(32)
+        run(["mount", "--make-private", str(lower)], check=False)
+
+    remount_lower(lower, rw=False, check=False)
+    return lower
 
 def run(cmd, check=True, quiet=False):
     cmd_str = ' '.join(cmd)
@@ -544,7 +624,6 @@ def flush_pending_on_boot(cfg: dict, workspace_root: Path):
             ok = False
             try:
                 remount_lower(lower, rw=True)
-
                 changed, bad = scrub_bad_specials(upper)
                 opq_removed = 0
                 try:
@@ -553,7 +632,6 @@ def flush_pending_on_boot(cfg: dict, workspace_root: Path):
                     pass
                 if changed or opq_removed:
                     log(f"SCRUBBED_UPPER: specials={len(bad)} opq_removed={opq_removed} under {upper}")
-
                 ok = rsync_upper_to_lower(str(upper), str(lower))
             finally:
                 try:
@@ -710,6 +788,7 @@ def rsync_upper_to_lower(upper_dir, lower_dir):
     args = [
         "rsync", "-aHA", "--inplace",
         "--no-specials", "--no-devices",
+        "--ignore-times",
         "--exclude", ".wh.*",
         "--stats", "--human-readable",
         upper_dir.rstrip("/") + "/",
@@ -792,12 +871,33 @@ def flush(cfg):
             lower = ensure_lower_bind(ws_root, p, name)
 
         # Unmount overlay so lower changes are seen on remount
+
+        # 1) Unmount overlay FIRST so that 'p' resolves to the real filesystem.
         if is_overlay_mounted(p):
             log(f"PRE-FLUSH_UNMOUNT: {p}")
             if not force_unmount_with_retry(p):
                 log(f"PRE-FLUSH_UNMOUNT_FAILED: {p}", "ERROR")
                 errors += 1
                 continue
+
+        # 2) Ensure the lower bind exists AFTER overlay is gone.
+        lower = lower_bind_for(ws_root, name)
+
+        # If lower exists but is "poisoned" (overlay), tear it down and rebind.
+        if is_mountpoint(lower) and not lower_bind_is_safe(lower):
+            info = findmnt_info(lower)
+            log(f"LOWER_BIND_BAD: {lower} source={info.get('source')} fstype={info.get('fstype')} - recreating", "ERROR")
+            force_unmount_with_retry(lower)
+
+        if not is_mountpoint(lower):
+            lower = ensure_lower_bind(ws_root, p, name)
+
+        # Final safety check: refuse to flush if lower is not a real mount.
+        if not lower_bind_is_safe(lower):
+            info = findmnt_info(lower)
+            log(f"LOWER_BIND_UNSAFE: refusing to flush {p} -> {lower} (source={info.get('source')} fstype={info.get('fstype')})", "ERROR")
+            errors += 1
+            continue
 
         ok = False
         try:
@@ -917,6 +1017,9 @@ def cmd_mount():
     log("MOUNT_CMD: Starting mount command")
     cfg = load_config()
     if cfg.get("enable", True):
+        if root_is_readonly():
+            log("ROOT_RO: / is read-only; refusing to mount overlays (protecting system)", "ERROR")
+            raise SystemExit(1)
         mount_overlays(cfg)
     else:
         log("DISABLED: Not mounting", "WARN")
@@ -1073,7 +1176,10 @@ def main():
     if cmd in mutating_cmds:
         check_and_create_lock("omv-writecache")
         ensure_persistent_journal()
-        log(f"SCRIPT_START: omv-writecache {cmd}")
+        cmdline = f"omv-writecache {cmd}"
+        if NO_FLUSH:
+            cmdline += " --no-flush"
+        log(f"SCRIPT_START: {cmdline}")
 
     if cmd == "mount":
         cmd_mount()
