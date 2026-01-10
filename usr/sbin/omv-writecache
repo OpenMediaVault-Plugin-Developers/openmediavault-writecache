@@ -1060,6 +1060,11 @@ def cmd_flush():
     ok = flush(cfg)
     sys.exit(0 if ok else 1)
 
+def cmd_rotateflush():
+    log("ROTATEFLUSH_CMD: Starting rotate+flush command")
+    journalctl_rotate_sync()
+    cmd_flush()
+
 def cmd_unmount():
     log("UNMOUNT_CMD: Starting unmount command")
     cfg = load_config()
@@ -1069,6 +1074,11 @@ def cmd_unmount():
         log("PRE_UNMOUNT_FLUSH: Flushing before unmount")
         flush(cfg)
     unmount(cfg)
+
+def cmd_rotateunmount():
+    log("ROTATEUNMOUNT_CMD: Starting rotate+unmount command")
+    journalctl_rotate_sync()
+    cmd_unmount()
 
 def cmd_status():
     cfg = load_config()
@@ -1167,6 +1177,7 @@ def main():
             "  rotateflush\n"
             "  flush\n"
             "  unmount [--no-flush]\n"
+            "  rotateunmount\n"
             "  remount\n"
             "  status\n"
             "  df\n"
@@ -1186,7 +1197,7 @@ def main():
 
     # Identify commands that should not lock and should not log
     no_lock_no_log_cmds = {"df", "status", "version", "-v", "--version"}
-    mutating_cmds = {"mount", "rotateflush", "flush", "unmount", "remount"}
+    mutating_cmds = {"mount", "rotateflush", "flush", "unmount", "rotateunmount", "remount"}
 
     # Disable logging entirely for df/status/version so there is no dated output
     if cmd in no_lock_no_log_cmds:
@@ -1214,12 +1225,13 @@ def main():
     if cmd == "mount":
         cmd_mount()
     elif cmd == "rotateflush":
-        journalctl_rotate_sync()
-        cmd_flush()
+        cmd_rotateflush()
     elif cmd == "flush":
         cmd_flush()
     elif cmd == "unmount":
         cmd_unmount()
+    elif cmd == "rotateunmount":
+        cmd_rotateunmount()
     elif cmd == "remount":
         cmd_unmount()
         cmd_mount()

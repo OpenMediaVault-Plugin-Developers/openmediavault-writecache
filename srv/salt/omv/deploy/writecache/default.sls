@@ -31,7 +31,7 @@
 
 {% set shutdown_action = None %}
 {% if config.flush_on_shutdown | to_bool %}
-{%   set shutdown_action = 'rotateflush' if (config.rotate_on_shutdown | to_bool) else 'flush' %}
+{%   set shutdown_action = 'rotateunmount' if (config.rotate_on_shutdown | to_bool) else 'unmount' %}
 {% endif %}
 
 {% set daily_action = None %}
@@ -132,7 +132,7 @@ omv-writecache-setup_service:
         Type=oneshot
         RemainAfterExit=yes
         ExecStart=/usr/sbin/omv-writecache mount
-        ExecStop=/usr/sbin/omv-writecache unmount
+        ExecStop=/usr/sbin/omv-writecache {{ shutdown_action }}
         TimeoutStartSec=180
         TimeoutStopSec=300
         KillMode=none
