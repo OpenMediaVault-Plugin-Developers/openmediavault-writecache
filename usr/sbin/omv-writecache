@@ -7,6 +7,7 @@
 # warranty of any kind, whether express or implied.
 #
 import os, sys, subprocess, time, re, shutil
+import stat
 import pwd, grp
 import atexit, signal
 import fcntl
@@ -523,6 +524,25 @@ def is_overlay_mounted(path: Path) -> bool:
     mounts = get_mounts()
     return any(m["path"] == str(path) and m["fstype"] == "overlay" for m in mounts)
 
+def is_overlayfs_whiteout(p: Path) -> bool:
+    """
+    overlayfs can represent whiteouts as character devices with rdev 0,0.
+    We treat those as valid deletion markers and MUST NOT scrub them.
+    """
+    try:
+        st = os.lstat(p)
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
+    if not stat.S_ISCHR(st.st_mode):
+        return False
+    try:
+       return os.major(st.st_rdev) == 0 and os.minor(st.st_rdev) == 0
+    except Exception:
+        return False
+
 def find_bad_specials(upper_dir: Path):
     bad = []
     for root, dirs, files in os.walk(upper_dir, topdown=True):
@@ -536,7 +556,10 @@ def find_bad_specials(upper_dir: Path):
             except FileNotFoundError:
                 continue
             # stat.S_ISCHR -> character device
-            if (st.st_mode & 0o170000) == 0o020000:  # chr dev
+            if stat.S_ISCHR(st.st_mode):
+                # DO NOT treat overlayfs whiteouts (chr 0,0) as "bad"
+                if is_overlayfs_whiteout(p):
+                    continue
                 bad.append(str(p))
     return bad
 
@@ -625,13 +648,8 @@ def flush_pending_on_boot(cfg: dict, workspace_root: Path):
             try:
                 remount_lower(lower, rw=True)
                 changed, bad = scrub_bad_specials(upper)
-                opq_removed = 0
-                try:
-                    opq_removed = clear_overlay_opq_and_whiteouts(upper)
-                except Exception:
-                    pass
-                if changed or opq_removed:
-                    log(f"SCRUBBED_UPPER: specials={len(bad)} opq_removed={opq_removed} under {upper}")
+                if changed:
+                    log(f"SCRUBBED_UPPER: specials={len(bad)} under {upper}")
                 ok = rsync_upper_to_lower(str(upper), str(lower))
             finally:
                 try:
@@ -722,6 +740,7 @@ def apply_whiteouts(upper_dir, lower_dir):
     Apply overlayfs whiteouts from upper -> lower.
     - .wh.<name> deletes <name> in lower
     - .wh..wh..opq makes directory opaque: remove lower entries not present in upper
+    - char device (0,0) entries are also overlayfs whiteouts on many systems
     """
     upper_dir = os.path.abspath(upper_dir)
     lower_dir = os.path.abspath(lower_dir)
@@ -768,6 +787,22 @@ def apply_whiteouts(upper_dir, lower_dir):
                     except FileNotFoundError:
                         pass
                 log(f"Applied whiteout for {target}")
+
+        # Char-device whiteouts (0,0): delete matching name in lower
+        for f in files:
+            if f.startswith(".wh."):
+                continue
+            up = Path(root) / f
+            if is_overlayfs_whiteout(up):
+                target = os.path.join(lower_root, f)
+                if os.path.isdir(target) and not os.path.islink(target):
+                    shutil.rmtree(target, ignore_errors=True)
+                else:
+                    try:
+                        os.remove(target)
+                    except FileNotFoundError:
+                        pass
+                log(f"Applied chrdev whiteout for {target}")
 
 def rsync_upper_to_lower(upper_dir, lower_dir):
     """
@@ -906,13 +941,8 @@ def flush(cfg):
 
             # scrub before syncing (whiteouts/opaque markers)
             changed, bad = scrub_bad_specials(upper)
-            opq_removed = 0
-            try:
-                opq_removed = clear_overlay_opq_and_whiteouts(upper)
-            except Exception:
-                pass
-            if changed or opq_removed:
-                log(f"SCRUBBED_UPPER: specials={len(bad)} opq_removed={opq_removed} under {upper}")
+            if changed:
+                log(f"SCRUBBED_UPPER: specials={len(bad)} under {upper}")
 
             # actual flush
             ok = rsync_upper_to_lower(str(upper), str(lower))
