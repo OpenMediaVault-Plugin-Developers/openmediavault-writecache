@@ -19,6 +19,7 @@ if ! omv_config_exists "${xpath}"; then
   omv_config_add_key "${xpath}" "hour" "3"
   omv_config_add_key "${xpath}" "minute" "45"
   omv_config_add_key "${xpath}" "rotate_on_shutdown" "1"
+  omv_config_add_key "${xpath}" "flush_hourly" "0"
   omv_config_add_key "${xpath}" "flush_daily" "0"
   omv_config_add_key "${xpath}" "rotate_on_daily_flush" "1"
   omv_config_add_key "${xpath}" "paths" \

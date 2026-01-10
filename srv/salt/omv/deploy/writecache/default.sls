@@ -34,6 +34,8 @@
 {%   set shutdown_action = 'rotateunmount' if (config.rotate_on_shutdown | to_bool) else 'unmount' %}
 {% endif %}
 
+{% set flush_hourly = config.flush_hourly | to_bool %}
+
 {% set daily_action = None %}
 {% if enabled and (config.flush_daily | to_bool) %}
 {%   set daily_action = 'rotateflush' if (config.rotate_on_daily_flush | to_bool) else 'flush' %}
@@ -72,6 +74,7 @@ configure_writecache_config:
         journald_storage: "{{ config.journald_storage }}"
         flush_on_boot: {{ config.flush_on_boot | to_bool }}
         flush_on_shutdown: {{ config.flush_on_shutdown | to_bool }}
+        flush_hourly: {{ flush_hourly }}
         flush_daily: {{ config.flush_daily | to_bool }}
         paths: |
 {%- for p in config.get('paths', '').splitlines() if p.strip() %}
@@ -177,7 +180,7 @@ writecache_setup_service_disable:
 {% endif %}
 
 
-{% if daily_action %}
+{% if daily_action or flush_hourly %}
 
 omv_writecache_cron:
   file.managed:
@@ -185,7 +188,12 @@ omv_writecache_cron:
     - contents: |
         {{ pillar['headers']['auto_generated'] }}
         {{ pillar['headers']['warning'] }}
+{%- if daily_action %}
         {{ config.minute }} {{ config.hour }} * * * root /usr/sbin/omv-writecache {{ daily_action }} >/dev/null 2>&1
+{%- endif %}
+{%- if flush_hourly %}
+        @hourly root /usr/sbin/omv-writecache flush >/dev/null 2>&1
+{%- endif %}
     - user: root
     - group: root
     - mode: 0644

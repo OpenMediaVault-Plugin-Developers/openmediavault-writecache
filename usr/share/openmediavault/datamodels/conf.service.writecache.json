@@ -53,6 +53,10 @@
       "type": "boolean",
       "default": true
     },
+    "flush_hourly": {
+      "type": "boolean",
+      "default": false
+    },
     "flush_daily": {
       "type": "boolean",
       "default": false

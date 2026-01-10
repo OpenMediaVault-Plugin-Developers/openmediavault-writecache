@@ -14,6 +14,10 @@ if ! omv_config_exists "${xpath}/sharedfolderref"; then
   omv_config_add_key "${xpath}" "sharedfolderref" ""
 fi
 
+if ! omv_config_exists "${xpath}/flush_hourly"; then
+  omv_config_add_key "${xpath}" "flush_hourly" "0"
+fi
+
 if ! omv_config_exists "${xpath}/flush_on_boot"; then
   omv_config_add_key "${xpath}" "flush_on_boot" "0"
 fi
