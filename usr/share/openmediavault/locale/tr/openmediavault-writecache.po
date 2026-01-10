@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: openmediavault-writecache\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-21 11:17-0500\n"
+"POT-Creation-Date: 2026-01-10 21:31+0000\n"
 "PO-Revision-Date: 2025-08-17 20:57+0000\n"
 "Language-Team: Turkish (https://app.transifex.com/openmediavault-plugin-developers/teams/1854/tr/)\n"
 "MIME-Version: 1.0\n"
@@ -35,13 +35,32 @@ msgstr ""
 msgid "Flush daily"
 msgstr ""
 
+msgid "Flush hourly"
+msgstr ""
+
+msgid "Flush on boot"
+msgstr ""
+
 msgid "Flush on shutdown"
+msgstr ""
+
+msgid "Hour"
+msgstr ""
+
+msgid ""
+"If checked, writecache will use system memory to store changes.<br/>If "
+"unchecked, writecache will store those changes in the selected shared "
+"folder. Changes are not lost if the system reboots or shuts down "
+"unexpectedly."
 msgstr ""
 
 msgid "Journal storage"
 msgstr ""
 
 msgid "Level"
+msgstr ""
+
+msgid "Minute"
 msgstr ""
 
 msgid "One entry per line <path> = drop|flush"
@@ -68,18 +87,21 @@ msgstr ""
 msgid "Running manual rotate and flush ..."
 msgstr ""
 
-msgid "Running test ..."
-msgstr ""
-
 msgid ""
 "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, "
 "25%."
 msgstr ""
 
-msgid "Test"
+msgid "Status"
 msgstr ""
 
-msgid "Will flush at 03:45 daily"
+msgid "Use system memory"
+msgstr ""
+
+msgid "Used to store temporary writecache changes."
+msgstr ""
+
+msgid "Workspace folder"
 msgstr ""
 
 msgid "Write Cache"

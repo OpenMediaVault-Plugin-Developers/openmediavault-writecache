@@ -11,7 +11,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: openmediavault-writecache\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-21 11:17-0500\n"
+"POT-Creation-Date: 2026-01-10 21:31+0000\n"
 "PO-Revision-Date: 2025-08-17 20:57+0000\n"
 "Last-Translator: songming <by@songming.me>, 2025\n"
 "Language-Team: Chinese (China) (https://app.transifex.com/openmediavault-plugin-developers/teams/1854/zh_CN/)\n"
@@ -39,14 +39,33 @@ msgstr "刷新"
 msgid "Flush daily"
 msgstr "每天刷新"
 
+msgid "Flush hourly"
+msgstr ""
+
+msgid "Flush on boot"
+msgstr ""
+
 msgid "Flush on shutdown"
 msgstr "关机时刷新"
+
+msgid "Hour"
+msgstr ""
+
+msgid ""
+"If checked, writecache will use system memory to store changes.<br/>If "
+"unchecked, writecache will store those changes in the selected shared "
+"folder. Changes are not lost if the system reboots or shuts down "
+"unexpectedly."
+msgstr ""
 
 msgid "Journal storage"
 msgstr "日志存储"
 
 msgid "Level"
 msgstr "级"
+
+msgid "Minute"
+msgstr ""
 
 msgid "One entry per line <path> = drop|flush"
 msgstr "每行一个输入 <path> = drop|flush"
@@ -72,19 +91,22 @@ msgstr "运行手动刷新 ..."
 msgid "Running manual rotate and flush ..."
 msgstr ""
 
-msgid "Running test ..."
-msgstr "运行测试 ..."
-
 msgid ""
 "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, "
 "25%."
 msgstr "分配给 /run/omv-writecache tmpfs 的大小。可使用 %，M/G后缀；例如：512M, 2G, 25%。"
 
-msgid "Test"
-msgstr "测试"
+msgid "Status"
+msgstr ""
 
-msgid "Will flush at 03:45 daily"
-msgstr "在每天 03:45 刷新"
+msgid "Use system memory"
+msgstr ""
+
+msgid "Used to store temporary writecache changes."
+msgstr ""
+
+msgid "Workspace folder"
+msgstr ""
 
 msgid "Write Cache"
 msgstr "写缓存"
