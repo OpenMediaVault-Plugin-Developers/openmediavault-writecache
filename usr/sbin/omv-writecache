@@ -267,6 +267,40 @@ def is_tmpfs_mounted_at(path: Path) -> bool:
             return True
     return False
 
+def drop_pending_changes(cfg: dict):
+    """
+    For policy=drop targets, discard any pending upper/work content in a persistent workspace.
+    This is required for workspace_type=path, otherwise 'drop' changes survive reboot.
+    """
+    ws_root = get_workspace_root(cfg)
+    items = list(parse_paths(cfg.get("paths", "")))
+
+    dropped = 0
+    for path, mode in items:
+        if mode != "drop":
+            continue
+        p = Path(path).resolve()
+        name = sanitize_name(str(p))
+        upper = ws_root / name / "upper"
+        work  = ws_root / name / "work"
+
+        # Nuke pending changes
+        try:
+            if upper.exists():
+                shutil.rmtree(upper, ignore_errors=True)
+            upper.mkdir(parents=True, exist_ok=True)
+
+            if work.exists():
+                shutil.rmtree(work, ignore_errors=True)
+            work.mkdir(parents=True, exist_ok=True)
+
+            log(f"DROP_CLEARED: {p} upper={upper}")
+            dropped += 1
+        except Exception as e:
+            log(f"DROP_CLEAR_FAILED: {p} - {e}", "ERROR")
+
+    log(f"DROP_CLEAR_COMPLETE: cleared={dropped}", "INFO")
+
 def ensure_workspace(cfg: dict) -> Path:
     """Ensure workspace root exists and (when configured) is mounted."""
     ws_type = get_workspace_type(cfg)
@@ -1033,7 +1067,12 @@ def unmount(cfg):
     # 3) aggressively unmount anything still mounted under the workspace root
     unmount_all_under_workspace(ws_root)
 
-    # 4) if workspace is a tmpfs that we mounted, unmount it
+    # 4) if workspace is persistent, ensure 'drop' policies actually drop changes
+    # (otherwise upper/ content survives reboot and reappears after next mount)
+    if ws_type == "path":
+        drop_pending_changes(cfg)
+
+    # 5) if workspace is a tmpfs that we mounted, unmount it
     if ws_type == "tmpfs":
         if is_mountpoint(ws_root):
             log(f"WORKSPACE_UNMOUNT_ROOT: {ws_root}")
