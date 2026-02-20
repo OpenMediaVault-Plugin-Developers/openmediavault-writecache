@@ -1169,6 +1169,93 @@ class WriteCacheTest:
                     pass
             return False
 
+    def test_dropin_file(self) -> bool:
+        """Verify the workspace mount drop-in file exists with correct content (tmpfs only)."""
+        log_test("\n>>> Test: workspace mount drop-in file", "INFO")
+
+        if self.workspace_type != "tmpfs":
+            log_test("Skip: workspace is not tmpfs", "WARN")
+            return True
+
+        dropin = Path(r"/etc/systemd/system/run-omv\x2dwritecache.mount.d/10-before-setup.conf")
+        if not dropin.exists():
+            log_test(f"Drop-in not found: {dropin}", "FAIL")
+            return False
+
+        content = dropin.read_text()
+        has_nodeps = "DefaultDependencies=no" in content
+        has_before = "Before=omv-writecache-setup.service" in content
+
+        log_test(f"Drop-in DefaultDependencies=no: {'OK' if has_nodeps else 'FAIL'}", "SUCCESS" if has_nodeps else "FAIL")
+        log_test(f"Drop-in Before=omv-writecache-setup.service: {'OK' if has_before else 'FAIL'}", "SUCCESS" if has_before else "FAIL")
+        return has_nodeps and has_before
+
+    def test_mount_unit_ordering(self) -> bool:
+        """After mount, verify systemd applied the drop-in to the workspace mount unit."""
+        log_test("\n>>> Test: workspace mount unit ordering (drop-in applied)", "INFO")
+
+        if self.workspace_type != "tmpfs":
+            log_test("Skip: workspace is not tmpfs", "WARN")
+            return True
+
+        ok_esc, unit_name, _ = run_sh(
+            ["systemd-escape", "--path", "--suffix=mount", str(self.workspace_root)],
+            timeout=5
+        )
+        if not ok_esc or not unit_name.strip():
+            log_test("Could not determine unit name via systemd-escape", "FAIL")
+            return False
+        unit_name = unit_name.strip()
+        log_test(f"Workspace mount unit: {unit_name}", "DEBUG")
+
+        ok_show, out, _ = run_sh(
+            ["systemctl", "show", unit_name, "--no-pager",
+             "--property=Before,Conflicts,DefaultDependencies"],
+            timeout=10
+        )
+        if not ok_show:
+            log_test(f"systemctl show failed for {unit_name} (unit not active?)", "WARN")
+            return True  # can't verify if unit doesn't exist yet
+
+        log_test(f"Unit properties:\n{out.strip()}", "DEBUG")
+
+        before_ok = "omv-writecache-setup.service" in out
+
+        conflicts_line = next((l for l in out.splitlines() if l.startswith("Conflicts=")), "")
+        no_umount_conflict = "umount.target" not in conflicts_line
+
+        log_test(f"Before= includes omv-writecache-setup.service: {'OK' if before_ok else 'FAIL'}", "SUCCESS" if before_ok else "FAIL")
+        log_test(f"Conflicts= excludes umount.target: {'OK' if no_umount_conflict else 'FAIL'}", "SUCCESS" if no_umount_conflict else "FAIL")
+        return before_ok and no_umount_conflict
+
+    def test_workspace_survives_flush(self) -> bool:
+        """Workspace tmpfs must remain mounted throughout a flush cycle."""
+        log_test("\n>>> Test: workspace survives flush", "INFO")
+
+        if self.workspace_type != "tmpfs":
+            log_test("Skip: workspace is not tmpfs", "WARN")
+            return True
+
+        def is_mounted(path: Path) -> bool:
+            try:
+                with open("/proc/mounts") as f:
+                    return any(line.split()[1] == str(path) for line in f)
+            except Exception:
+                return False
+
+        before = is_mounted(self.workspace_root)
+        if not before:
+            log_test(f"Workspace not mounted before flush: {self.workspace_root}", "FAIL")
+            return False
+
+        ok, _ = run_cmd("flush")
+
+        after = is_mounted(self.workspace_root)
+
+        log_test(f"Workspace mounted before flush: {'OK' if before else 'FAIL'}", "SUCCESS" if before else "FAIL")
+        log_test(f"Workspace mounted after flush:  {'OK' if after else 'FAIL'}", "SUCCESS" if after else "FAIL")
+        return ok and after
+
     # ========== MAIN TEST RUNNER ==========
 
     def run(self) -> Dict[str, bool]:
@@ -1193,6 +1280,9 @@ class WriteCacheTest:
             "empty_directories": False,
             "long_filenames": False,
             "unicode_filenames": False,
+            "dropin_file": False,
+            "mount_unit_ordering": False,
+            "workspace_survives_flush": False,
             "postfix_baseline": False,
             "postfix_after_mount": False,
             "postfix_after_flush": False,
@@ -1203,6 +1293,9 @@ class WriteCacheTest:
             # Baseline Postfix health before any mount/flush/unmount
             log_test("\n>>> Test 0: postfix baseline", "INFO")
             results["postfix_baseline"], _ = check_postfix("baseline")
+
+            # Drop-in file (static check, before any mounting)
+            results["dropin_file"] = self.test_dropin_file()
 
             # Mount
             log_test("\n>>> Test 1: mount", "INFO")
@@ -1219,6 +1312,9 @@ class WriteCacheTest:
                 else:
                     log_test(f"Overlay NOT mounted: {path}", "FAIL")
                     results["mount"] = False
+
+            # Verify drop-in was applied to the auto-generated mount unit
+            results["mount_unit_ordering"] = self.test_mount_unit_ordering()
 
             # Check Postfix after mount
             results["postfix_after_mount"], _ = check_postfix("mount")
@@ -1246,6 +1342,9 @@ class WriteCacheTest:
                 results["flush"] = results["flush"] and still_ok
                 log_test("Flush verify: " + ("OK" if still_ok else "FAIL"),
                          "SUCCESS" if still_ok else "FAIL")
+
+            # Verify workspace tmpfs survived the flush
+            results["workspace_survives_flush"] = self.test_workspace_survives_flush()
 
             # Check Postfix after flush
             results["postfix_after_flush"], _ = check_postfix("flush")
