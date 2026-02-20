@@ -155,11 +155,51 @@ omv-writecache-setup_service:
 
 {% endif %}
 
+{# Always remove any explicit mount unit file left over from previous approach #}
+omv-writecache-workspace-mount:
+  file.absent:
+    - name: /etc/systemd/system/run-omv\x2dwritecache.mount
+
+{% if enabled and use_tmpfs %}
+
+omv-writecache-workspace-mount-dropin-dir:
+  file.directory:
+    - name: /etc/systemd/system/run-omv\x2dwritecache.mount.d
+    - user: root
+    - group: root
+    - mode: '0755'
+
+omv-writecache-workspace-mount-dropin:
+  file.managed:
+    - name: /etc/systemd/system/run-omv\x2dwritecache.mount.d/10-before-setup.conf
+    - contents: |
+        [Unit]
+        DefaultDependencies=no
+        Before=omv-writecache-setup.service
+    - user: root
+    - group: root
+    - mode: '0644'
+    - require:
+      - file: omv-writecache-workspace-mount-dropin-dir
+
+{% else %}
+
+omv-writecache-workspace-mount-dropin-dir:
+  file.absent:
+    - name: /etc/systemd/system/run-omv\x2dwritecache.mount.d
+
+omv-writecache-workspace-mount-dropin:
+  file.absent:
+    - name: /etc/systemd/system/run-omv\x2dwritecache.mount.d/10-before-setup.conf
+
+{% endif %}
+
 writecache_systemctl_daemon_reload:
   module.run:
     - name: service.systemctl_reload
     - onchanges:
       - file: omv-writecache-setup_service
+      - file: omv-writecache-workspace-mount-dropin
 
 {% if enabled %}
 
