@@ -1,8 +1,9 @@
-openmediavault-writecache (8.1) UNRELEASED; urgency=medium
+openmediavault-writecache (8.0.10) stable; urgency=low
 
-  * Split systemd unit into startup and two shutdown services
+  * Fix flush on shutdown when using tmpfs workspace
+  * Add omv-writecache-test checks for shutdown ordering and workspace integrity
 
- -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Fri, 02 Jan 2026 12:36:48 +0000
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Fri, 20 Feb 2026 23:54:59 +0000
 
 openmediavault-writecache (8.0.9) stable; urgency=low
 
