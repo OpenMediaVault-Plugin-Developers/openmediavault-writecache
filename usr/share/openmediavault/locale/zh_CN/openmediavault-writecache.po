@@ -4,7 +4,7 @@
 # FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
 # 
 # Translators:
-# songming <by@songming.me>, 2025
+# songming <by@songming.me>, 2026
 # 
 #, fuzzy
 msgid ""
@@ -13,7 +13,7 @@ msgstr ""
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-01-10 21:31+0000\n"
 "PO-Revision-Date: 2025-08-17 20:57+0000\n"
-"Last-Translator: songming <by@songming.me>, 2025\n"
+"Last-Translator: songming <by@songming.me>, 2026\n"
 "Language-Team: Chinese (China) (https://app.transifex.com/openmediavault-plugin-developers/teams/1854/zh_CN/)\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
@@ -40,16 +40,16 @@ msgid "Flush daily"
 msgstr "每天刷新"
 
 msgid "Flush hourly"
-msgstr ""
+msgstr "每小时刷新"
 
 msgid "Flush on boot"
-msgstr ""
+msgstr "启动时刷新"
 
 msgid "Flush on shutdown"
 msgstr "关机时刷新"
 
 msgid "Hour"
-msgstr ""
+msgstr "小时"
 
 msgid ""
 "If checked, writecache will use system memory to store changes.<br/>If "
@@ -57,6 +57,7 @@ msgid ""
 "folder. Changes are not lost if the system reboots or shuts down "
 "unexpectedly."
 msgstr ""
+"如果选中，写缓存将使用系统内存来存储变更。<br/>如果未选中，写缓存将把这些变更存储在所选的共享文件夹中。如果系统意外重启或关闭，变更不会丢失。"
 
 msgid "Journal storage"
 msgstr "日志存储"
@@ -65,7 +66,7 @@ msgid "Level"
 msgstr "级"
 
 msgid "Minute"
-msgstr ""
+msgstr "分钟"
 
 msgid "One entry per line <path> = drop|flush"
 msgstr "每行一个输入 <path> = drop|flush"
@@ -74,22 +75,22 @@ msgid "Overlay paths and policy"
 msgstr "覆盖路径及策略"
 
 msgid "Rotate & Flush"
-msgstr ""
+msgstr "轮转与刷新"
 
 msgid "Rotate on daily flush"
-msgstr ""
+msgstr "每日刷新时轮转"
 
 msgid "Rotate on shutdown"
-msgstr ""
+msgstr "关机时轮转"
 
 msgid "Run journalctl rotate and sync before flush"
-msgstr ""
+msgstr "在刷新前先运行 journalctl 轮转与同步"
 
 msgid "Running manual flush ..."
 msgstr "运行手动刷新 ..."
 
 msgid "Running manual rotate and flush ..."
-msgstr ""
+msgstr "运行手动轮转和刷新 ..."
 
 msgid ""
 "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, "
@@ -97,16 +98,16 @@ msgid ""
 msgstr "分配给 /run/omv-writecache tmpfs 的大小。可使用 %，M/G后缀；例如：512M, 2G, 25%。"
 
 msgid "Status"
-msgstr ""
+msgstr "状态"
 
 msgid "Use system memory"
-msgstr ""
+msgstr "使用系统内存"
 
 msgid "Used to store temporary writecache changes."
-msgstr ""
+msgstr "用于存储临时写入缓存变更。"
 
 msgid "Workspace folder"
-msgstr ""
+msgstr "工作区文件夹"
 
 msgid "Write Cache"
 msgstr "写缓存"
