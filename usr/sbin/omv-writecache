@@ -449,7 +449,7 @@ def ensure_lower_bind(workspace_root: Path, real_path: Path, name: str) -> Path:
 def run(cmd, check=True, quiet=False):
     cmd_str = ' '.join(cmd)
     log(f"CMD: {cmd_str}", "DEBUG")
-    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd="/")
     if res.returncode != 0:
         log(f"CMD_FAILED: {cmd_str} (exit {res.returncode})", "ERROR")
         if res.stdout.strip() and not quiet:
