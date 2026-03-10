@@ -446,6 +446,11 @@ def ensure_lower_bind(workspace_root: Path, real_path: Path, name: str) -> Path:
     remount_lower(lower, rw=False, check=False)
     return lower
 
+def ensure_dir_permissions(p: Path):
+    if str(p) == "/tmp" or str(p) == "/var/tmp":
+        # Everyone can read & write but not remove other's files (sticky bit)
+        p.chmod(0o1777, follow_symlinks=False)
+
 def run(cmd, check=True, quiet=False):
     cmd_str = ' '.join(cmd)
     log(f"CMD: {cmd_str}", "DEBUG")
@@ -766,6 +771,7 @@ def mount_overlays(cfg):
         res = run(["mount", "-t", "overlay", "overlay", "-o", opts, str(p)], check=False)
         if res.returncode == 0:
             log(f"MOUNTED: {p} policy={mode}")
+            ensure_dir_permissions(p)
         else:
             log(f"MOUNT_FAILED: {p}", "ERROR")
 
@@ -1032,6 +1038,8 @@ def flush(cfg):
         if mount_result.returncode != 0:
             log(f"POST-FLUSH_MOUNT_FAILED: {p} - exit {mount_result.returncode}", "ERROR")
             errors += 1
+        else:
+            ensure_dir_permissions(p)
 
     log("FLUSH_COMPLETE: Success" if errors == 0 else f"FLUSH_COMPLETE: {errors} errors",
         "ERROR" if errors else "INFO")
