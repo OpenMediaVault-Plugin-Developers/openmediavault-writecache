@@ -851,6 +851,14 @@ def rsync_upper_to_lower(upper_dir, lower_dir):
     upper_dir = os.path.abspath(upper_dir)
     lower_dir = os.path.abspath(lower_dir)
 
+    # Save lower root's own attributes before rsync. When overlayfs records a
+    # chmod/chown on the managed path (e.g. an app chowns its log dir to
+    # root:root 777), it stores that by modifying upper/'s own mode/owner.
+    # rsync -a then copies those attributes onto lower/ at the end of the
+    # transfer, permanently altering the real directory's ownership/mode.
+    # We restore them afterwards so only the *contents* are affected.
+    lower_root_stat = os.stat(lower_dir)
+
     log(f"RSYNC: {upper_dir} -> {lower_dir}", "DEBUG")
     apply_whiteouts(upper_dir, lower_dir)
 
@@ -887,6 +895,16 @@ def rsync_upper_to_lower(upper_dir, lower_dir):
         if total_bytes:
             info.append(f"{total_bytes} transferred")
         log(f"RSYNC_STATS: {upper_dir} -> {lower_dir} :: {'; '.join(info)}", "INFO")
+
+    # Restore the root directory's original owner/mode. rsync -a fixes up
+    # directory attributes at the end of the transfer, including the
+    # destination root, which would otherwise inherit upper/'s owner/mode.
+    try:
+        os.chmod(lower_dir, stat.S_IMODE(lower_root_stat.st_mode))
+        os.chown(lower_dir, lower_root_stat.st_uid, lower_root_stat.st_gid)
+        log(f"RSYNC_ROOT_ATTR_RESTORED: {lower_dir} uid={lower_root_stat.st_uid} gid={lower_root_stat.st_gid} mode={oct(stat.S_IMODE(lower_root_stat.st_mode))}", "DEBUG")
+    except Exception as e:
+        log(f"RSYNC_ROOT_ATTR_RESTORE_FAILED: {lower_dir} - {e}", "WARN")
 
     if proc.returncode == 0:
         log(f"RSYNC_OK: {upper_dir} -> {lower_dir}", "DEBUG")
