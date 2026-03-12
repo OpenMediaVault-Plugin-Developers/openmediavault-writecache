@@ -1,3 +1,9 @@
+openmediavault-writecache (8.1.2) stable; urgency=low
+
+  * Fix flush changing managed directory owner/mode
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Thu, 12 Mar 2026 00:00:00 +0000
+
 openmediavault-writecache (8.1.1) stable; urgency=low
 
   * Fix flush on shutdown when using tmpfs workspace
