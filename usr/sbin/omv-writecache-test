@@ -1256,6 +1256,83 @@ class WriteCacheTest:
         log_test(f"Workspace mounted after flush:  {'OK' if after else 'FAIL'}", "SUCCESS" if after else "FAIL")
         return ok and after
 
+    def test_flush_preserves_dir_ownership(self) -> bool:
+        """
+        Flush must not alter the managed directory's own uid/gid/mode.
+
+        When an app chmod/chowns the managed path while the overlay is active,
+        overlayfs records the change in the upper directory's own attributes.
+        rsync -a then propagates those onto the lower (real) directory at the
+        end of the transfer.  The fix saves/restores lower root's stat around
+        rsync so only the *contents* are affected.
+        """
+        log_test("\n>>> Test: flush preserves directory ownership", "INFO")
+
+        flush_paths = [(p, m) for p, m in self.config_paths.items()
+                       if m in ("flush", "persist", "writeback")]
+        if not flush_paths:
+            log_test("Skip: no flush/persist/writeback paths configured", "WARN")
+            return True
+
+        ok_all = True
+        for path_str, _ in flush_paths:
+            p = Path(path_str)
+            try:
+                # Stat now (overlay root with no copy-up yet == lower's attrs).
+                orig = os.stat(str(p))
+                orig_mode = stat.S_IMODE(orig.st_mode)
+                orig_uid  = orig.st_uid
+                orig_gid  = orig.st_gid
+                log_test(f"  {path_str}: original uid={orig_uid} gid={orig_gid} mode={oct(orig_mode)}", "INFO")
+
+                # Simulate an app chowning/chmodding the managed directory while
+                # the overlay is active.  overlayfs records this by setting the
+                # upper directory's own mode/owner, which rsync then copies to lower.
+                os.chmod(str(p), 0o777)
+                os.chown(str(p), 0, 0)
+                log_test(f"  {path_str}: set to root:root 0o777 via overlay to simulate app behaviour", "INFO")
+
+                ok, _ = run_cmd("flush")
+                if not ok:
+                    log_test(f"  {path_str}: flush command failed", "FAIL")
+                    ok_all = False
+                    try:
+                        os.chmod(str(p), orig_mode)
+                        os.chown(str(p), orig_uid, orig_gid)
+                    except Exception:
+                        pass
+                    continue
+
+                # After flush the upper is cleared and the overlay is remounted;
+                # the overlay root now shows the real directory's attributes.
+                after = os.stat(str(p))
+                after_mode = stat.S_IMODE(after.st_mode)
+                after_uid  = after.st_uid
+                after_gid  = after.st_gid
+
+                if after_mode == orig_mode and after_uid == orig_uid and after_gid == orig_gid:
+                    log_test(f"  {path_str}: dir ownership preserved OK "
+                             f"(uid={after_uid} gid={after_gid} mode={oct(after_mode)})", "SUCCESS")
+                else:
+                    log_test(f"  {path_str}: dir ownership changed! "
+                             f"expected uid={orig_uid} gid={orig_gid} mode={oct(orig_mode)}, "
+                             f"got uid={after_uid} gid={after_gid} mode={oct(after_mode)}", "FAIL")
+                    ok_all = False
+                    # Restore so subsequent tests are not disrupted.
+                    try:
+                        os.chmod(str(p), orig_mode)
+                        os.chown(str(p), orig_uid, orig_gid)
+                    except Exception:
+                        pass
+
+            except PermissionError as e:
+                log_test(f"  {path_str}: permission error (requires root): {e}", "WARN")
+            except Exception as e:
+                log_test(f"  {path_str}: unexpected error: {e}", "FAIL")
+                ok_all = False
+
+        return ok_all
+
     # ========== MAIN TEST RUNNER ==========
 
     def run(self) -> Dict[str, bool]:
@@ -1283,6 +1360,7 @@ class WriteCacheTest:
             "dropin_file": False,
             "mount_unit_ordering": False,
             "workspace_survives_flush": False,
+            "flush_preserves_dir_ownership": False,
             "postfix_baseline": False,
             "postfix_after_mount": False,
             "postfix_after_flush": False,
@@ -1345,6 +1423,9 @@ class WriteCacheTest:
 
             # Verify workspace tmpfs survived the flush
             results["workspace_survives_flush"] = self.test_workspace_survives_flush()
+
+            # Verify flush does not corrupt the managed directory's uid/gid/mode
+            results["flush_preserves_dir_ownership"] = self.test_flush_preserves_dir_ownership()
 
             # Check Postfix after flush
             results["postfix_after_flush"], _ = check_postfix("flush")
