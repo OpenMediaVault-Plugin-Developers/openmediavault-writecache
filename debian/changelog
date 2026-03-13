@@ -1,3 +1,10 @@
+openmediavault-writecache (8.1.3) stable; urgency=low
+
+  * Add optional owner= and mode= attributes to path policy config
+  * Allow pinning ownership/permissions on managed directory root after flush
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Fri, 13 Mar 2026 00:00:00 +0000
+
 openmediavault-writecache (8.1.2) stable; urgency=low
 
   * Fix flush changing managed directory owner/mode
