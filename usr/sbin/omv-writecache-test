@@ -6,7 +6,7 @@
 # License version 2. This program is licensed "as is" without any
 # warranty of any kind, whether express or implied.
 #
-# version: 0.2.0
+# version: 0.2.1
 #
 # Test script for omv-writecache
 # Uses the config at /etc/omv-writecache/config.yaml and tests
@@ -239,11 +239,15 @@ def get_workspace_info(cfg: dict) -> Tuple[str, Path]:
 def load_config_paths(cfg: Optional[dict] = None) -> Dict[str, str]:
     """
     Read /etc/omv-writecache/config.yaml and return {path: policy}.
-    Expects a 'paths' multi-line string with lines like: "/var/log = flush"
+    Expects a 'paths' multi-line string with lines like:
+        /var/log = flush
+        /var/lib/docker = flush owner=root:docker mode=0710
+
+    The optional owner= and mode= attributes are stripped; only the policy
+    keyword (flush/drop/persist/writeback) is stored in the returned dict.
     """
     if cfg is None:
         cfg = load_config()
-
 
     paths_block = cfg.get("paths", "") or ""
     result: Dict[str, str] = {}
@@ -255,7 +259,8 @@ def load_config_paths(cfg: Optional[dict] = None) -> Dict[str, str]:
             continue
         left, right = line.split("=", 1)
         path = left.strip()
-        policy = right.strip().lower()
+        # policy is the first token; remaining tokens are owner=/mode= attrs
+        policy = right.strip().split()[0].lower() if right.strip() else ""
         if path and policy:
             result[path] = policy
     if not result:
@@ -1333,6 +1338,118 @@ class WriteCacheTest:
 
         return ok_all
 
+    def test_enforced_dir_ownership(self) -> bool:
+        """
+        When a path is configured with owner= and/or mode= attributes, flush
+        must apply those specific values to the managed directory root,
+        overriding whatever rsync would have written.
+
+        This test only runs if at least one flush/persist/writeback path has
+        an owner= or mode= attribute in the config.  It is skipped (pass) when
+        no such paths are configured.
+        """
+        log_test("\n>>> Test: enforced directory ownership (owner=/mode= attributes)", "INFO")
+
+        import subprocess as _sp
+
+        # Re-parse the raw config to pick up owner= / mode= tokens.
+        cfg = load_config()
+        paths_block = str(cfg.get("paths", "") or "")
+        import pwd as _pwd, grp as _grp
+
+        entries = []  # [(path_str, policy, uid_or_None, gid_or_None, mode_or_None)]
+        for raw in paths_block.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            left, rest = line.split("=", 1)
+            path_str = left.strip()
+            parts = rest.strip().split()
+            policy = parts[0].lower() if parts else "drop"
+            if policy not in ("flush", "persist", "writeback"):
+                continue
+            uid = gid = perms = None
+            for token in parts[1:]:
+                if token.startswith("owner="):
+                    val = token[6:]
+                    user, sep, group = val.partition(":")
+                    if user:
+                        try:
+                            uid = _pwd.getpwnam(user).pw_uid
+                        except KeyError:
+                            try:
+                                uid = int(user)
+                            except ValueError:
+                                pass
+                    if sep and group:
+                        try:
+                            gid = _grp.getgrnam(group).gr_gid
+                        except KeyError:
+                            try:
+                                gid = int(group)
+                            except ValueError:
+                                pass
+                elif token.startswith("mode="):
+                    try:
+                        perms = int(token[5:], 8)
+                    except ValueError:
+                        pass
+            if uid is not None or gid is not None or perms is not None:
+                entries.append((path_str, policy, uid, gid, perms))
+
+        if not entries:
+            log_test("Skip: no flush paths with owner= or mode= attributes configured", "WARN")
+            return True
+
+        ok_all = True
+        for path_str, _, want_uid, want_gid, want_mode in entries:
+            p = Path(path_str)
+            try:
+                # Deliberately set the managed directory to wrong attrs via the overlay.
+                wrong_uid = 0
+                wrong_gid = 0
+                wrong_mode = 0o777
+                os.chmod(str(p), wrong_mode)
+                os.chown(str(p), wrong_uid, wrong_gid)
+                log_test(f"  {path_str}: set to root:root 0o777 to simulate bad app behaviour", "INFO")
+
+                ok, _ = run_cmd("flush")
+                if not ok:
+                    log_test(f"  {path_str}: flush command failed", "FAIL")
+                    ok_all = False
+                    continue
+
+                after = os.stat(str(p))
+                after_mode = stat.S_IMODE(after.st_mode)
+                after_uid  = after.st_uid
+                after_gid  = after.st_gid
+
+                uid_ok   = (want_uid  is None or after_uid  == want_uid)
+                gid_ok   = (want_gid  is None or after_gid  == want_gid)
+                mode_ok  = (want_mode is None or after_mode == want_mode)
+
+                if uid_ok and gid_ok and mode_ok:
+                    log_test(f"  {path_str}: enforced attrs applied OK "
+                             f"(uid={after_uid} gid={after_gid} mode={oct(after_mode)})", "SUCCESS")
+                else:
+                    msgs = []
+                    if not uid_ok:
+                        msgs.append(f"uid: want {want_uid} got {after_uid}")
+                    if not gid_ok:
+                        msgs.append(f"gid: want {want_gid} got {after_gid}")
+                    if not mode_ok:
+                        msgs.append(f"mode: want {oct(want_mode)} got {oct(after_mode)}")
+                    log_test(f"  {path_str}: enforced attrs NOT applied — {'; '.join(msgs)}", "FAIL")
+                    ok_all = False
+
+            except PermissionError as e:
+                log_test(f"  {path_str}: permission error (requires root): {e}", "WARN")
+            except Exception as e:
+                log_test(f"  {path_str}: unexpected error: {e}", "FAIL")
+                ok_all = False
+
+        return ok_all
+
     # ========== MAIN TEST RUNNER ==========
 
     def run(self) -> Dict[str, bool]:
@@ -1361,6 +1478,7 @@ class WriteCacheTest:
             "mount_unit_ordering": False,
             "workspace_survives_flush": False,
             "flush_preserves_dir_ownership": False,
+            "flush_enforces_dir_ownership": False,
             "postfix_baseline": False,
             "postfix_after_mount": False,
             "postfix_after_flush": False,
@@ -1426,6 +1544,9 @@ class WriteCacheTest:
 
             # Verify flush does not corrupt the managed directory's uid/gid/mode
             results["flush_preserves_dir_ownership"] = self.test_flush_preserves_dir_ownership()
+
+            # Verify flush applies user-specified owner=/mode= attrs when configured
+            results["flush_enforces_dir_ownership"] = self.test_enforced_dir_ownership()
 
             # Check Postfix after flush
             results["postfix_after_flush"], _ = check_postfix("flush")

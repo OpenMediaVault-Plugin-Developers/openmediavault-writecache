@@ -12,13 +12,16 @@ import pwd, grp
 import atexit, signal
 import fcntl
 from pathlib import Path
+from collections import namedtuple
+
+PathEntry = namedtuple("PathEntry", ["path", "mode", "uid", "gid", "perms"])
 
 try:
     import yaml  # type: ignore
 except Exception:
     yaml = None
 
-SCRIPT_VERSION = "0.1.0"
+SCRIPT_VERSION = "0.1.1"
 CONFIG = Path("/etc/omv-writecache/config.yaml")
 
 # Workspace root for overlay metadata (lower binds, upperdirs, workdirs).
@@ -276,7 +279,8 @@ def drop_pending_changes(cfg: dict):
     items = list(parse_paths(cfg.get("paths", "")))
 
     dropped = 0
-    for path, mode in items:
+    for entry in items:
+        path, mode = entry.path, entry.mode
         if mode != "drop":
             continue
         p = Path(path).resolve()
@@ -529,26 +533,85 @@ def load_config():
         log(f"CONFIG_ERROR: {e}", "ERROR")
     return defaults
 
+def parse_owner_mode(attr_str):
+    """Parse 'owner=user:group mode=0755' tokens into (uid, gid, perms).
+
+    Each value is optional; returns None for any attribute not specified.
+    owner= accepts 'user', 'user:group', or ':group'.
+    mode= accepts an octal string such as '0755' or '755'.
+    """
+    uid = gid = perms = None
+    for token in attr_str.split():
+        if token.startswith("owner="):
+            val = token[6:]
+            user, sep, group = val.partition(":")
+            if user:
+                try:
+                    uid = pwd.getpwnam(user).pw_uid
+                except KeyError:
+                    try:
+                        uid = int(user)
+                    except ValueError:
+                        log(f"PARSE_OWNER_WARN: unknown user '{user}'", "WARN")
+            if sep and group:
+                try:
+                    gid = grp.getgrnam(group).gr_gid
+                except KeyError:
+                    try:
+                        gid = int(group)
+                    except ValueError:
+                        log(f"PARSE_OWNER_WARN: unknown group '{group}'", "WARN")
+        elif token.startswith("mode="):
+            val = token[5:]
+            try:
+                perms = int(val, 8)
+            except ValueError:
+                log(f"PARSE_MODE_WARN: invalid mode '{val}' (expected octal)", "WARN")
+    return uid, gid, perms
+
+
 def parse_paths(paths_text):
+    """Parse the paths config block into a list of PathEntry namedtuples.
+
+    Each non-comment line has the form:
+        /some/path = mode [owner=user:group] [mode=0755]
+
+    The optional owner= and mode= attributes allow enforcing specific ownership
+    and permissions on the managed directory root after every flush, overriding
+    the default behaviour of restoring the pre-rsync attributes.
+    """
     items = []
     for line in paths_text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        if "=" in line:
-            k, v = line.split("=", 1)
-            p = k.strip()
-            mode = v.strip()
+        tokens = line.split()
+        if "=" in tokens:
+            # Format: /some/path = mode [owner=user:group] [mode=0755]
+            # The standalone '=' token is the policy separator; everything
+            # before it is the path (preserving any embedded spaces).
+            eq_idx = tokens.index("=")
+            p = " ".join(tokens[:eq_idx])
+            rest = tokens[eq_idx + 1:]
+            mode = rest[0] if rest else "drop"
+            uid, gid, perms = parse_owner_mode(" ".join(rest[1:]))
         else:
-            p = line.strip()
+            # No policy separator — strip any trailing owner=/mode= tokens
+            # (identifiable by containing '=') from the right so that paths
+            # containing spaces are preserved intact.
+            attr_tokens = []
+            while tokens and "=" in tokens[-1] and not tokens[-1].startswith("/"):
+                attr_tokens.insert(0, tokens.pop())
+            p = " ".join(tokens)
             mode = "drop"
-        items.append((p, mode))
+            uid, gid, perms = parse_owner_mode(" ".join(attr_tokens))
+        items.append(PathEntry(p, mode, uid, gid, perms))
     # dedupe preserving order
     seen = set(); res = []
-    for p, mode in items:
-        if p not in seen:
-            res.append((p, mode))
-            seen.add(p)
+    for entry in items:
+        if entry.path not in seen:
+            res.append(entry)
+            seen.add(entry.path)
     return res
 
 def sanitize_name(p):
@@ -660,7 +723,8 @@ def flush_pending_on_boot(cfg: dict, workspace_root: Path):
     log(f"BOOT_FLUSH_START: Checking persistent workspace for pending changes under {workspace_root}")
     errors = 0
 
-    for path, mode in parse_paths(cfg.get("paths", "")):
+    for entry in parse_paths(cfg.get("paths", "")):
+        path, mode = entry.path, entry.mode
         # Only flush modes that are intended to write back.
         if mode not in ("flush", "persist", "writeback"):
             continue
@@ -684,7 +748,10 @@ def flush_pending_on_boot(cfg: dict, workspace_root: Path):
                 changed, bad = scrub_bad_specials(upper)
                 if changed:
                     log(f"SCRUBBED_UPPER: specials={len(bad)} under {upper}")
-                ok = rsync_upper_to_lower(str(upper), str(lower))
+                ok = rsync_upper_to_lower(str(upper), str(lower),
+                                          enforce_uid=entry.uid,
+                                          enforce_gid=entry.gid,
+                                          enforce_mode=entry.perms)
             finally:
                 try:
                     remount_lower(lower, rw=False)
@@ -735,7 +802,8 @@ def mount_overlays(cfg):
     if cfg.get("flush_on_boot", False) and ws_type == "path":
         flush_pending_on_boot(cfg, ws_root)
 
-    for path, mode in parse_paths(cfg.get("paths", "")):
+    for entry in parse_paths(cfg.get("paths", "")):
+        path, mode = entry.path, entry.mode
         p = Path(path).resolve()
         # Do not allow overlay targets inside our workspace (e.g., lower/upper/work)
         if str(p).startswith(str(ws_root) + "/") or str(p) == str(ws_root):
@@ -838,7 +906,7 @@ def apply_whiteouts(upper_dir, lower_dir):
                         pass
                 log(f"Applied chrdev whiteout for {target}")
 
-def rsync_upper_to_lower(upper_dir, lower_dir):
+def rsync_upper_to_lower(upper_dir, lower_dir, enforce_uid=None, enforce_gid=None, enforce_mode=None):
     """
     Sync overlayfs upper -> lower.
     - Apply whiteouts before rsync.
@@ -846,6 +914,11 @@ def rsync_upper_to_lower(upper_dir, lower_dir):
     - Avoid specials/devices so we don't mknod transient files.
     - Treat rsync 23/24 as non-fatal (vanished files etc.).
     - Report number of files transferred.
+
+    If enforce_uid/enforce_gid/enforce_mode are given they are applied to
+    lower_dir after rsync instead of the saved pre-rsync attributes.  This
+    lets callers pin specific ownership/permissions on the managed directory
+    root regardless of what overlayfs or rsync may have written.
     """
     os.makedirs(lower_dir, exist_ok=True)
     upper_dir = os.path.abspath(upper_dir)
@@ -896,13 +969,19 @@ def rsync_upper_to_lower(upper_dir, lower_dir):
             info.append(f"{total_bytes} transferred")
         log(f"RSYNC_STATS: {upper_dir} -> {lower_dir} :: {'; '.join(info)}", "INFO")
 
-    # Restore the root directory's original owner/mode. rsync -a fixes up
-    # directory attributes at the end of the transfer, including the
-    # destination root, which would otherwise inherit upper/'s owner/mode.
+    # Restore the root directory's owner/mode.  rsync -a fixes up directory
+    # attributes at the end of the transfer, including the destination root,
+    # which would otherwise inherit upper/'s owner/mode.
+    # If the caller specified enforce_* values, use those; otherwise fall back
+    # to the pre-rsync attributes captured above so we never alter the real
+    # directory's ownership/permissions.
+    final_uid  = enforce_uid  if enforce_uid  is not None else lower_root_stat.st_uid
+    final_gid  = enforce_gid  if enforce_gid  is not None else lower_root_stat.st_gid
+    final_mode = enforce_mode if enforce_mode is not None else stat.S_IMODE(lower_root_stat.st_mode)
     try:
-        os.chmod(lower_dir, stat.S_IMODE(lower_root_stat.st_mode))
-        os.chown(lower_dir, lower_root_stat.st_uid, lower_root_stat.st_gid)
-        log(f"RSYNC_ROOT_ATTR_RESTORED: {lower_dir} uid={lower_root_stat.st_uid} gid={lower_root_stat.st_gid} mode={oct(stat.S_IMODE(lower_root_stat.st_mode))}", "DEBUG")
+        os.chmod(lower_dir, final_mode)
+        os.chown(lower_dir, final_uid, final_gid)
+        log(f"RSYNC_ROOT_ATTR_RESTORED: {lower_dir} uid={final_uid} gid={final_gid} mode={oct(final_mode)}", "DEBUG")
     except Exception as e:
         log(f"RSYNC_ROOT_ATTR_RESTORE_FAILED: {lower_dir} - {e}", "WARN")
 
@@ -940,7 +1019,8 @@ def flush(cfg):
         log(f"WORKSPACE_NOT_READY: {ws_root} (cannot flush)", "ERROR")
         return False
     errors = 0
-    for path, mode in parse_paths(cfg.get("paths", "")):
+    for entry in parse_paths(cfg.get("paths", "")):
+        path, mode = entry.path, entry.mode
         if mode not in ("flush", "persist", "writeback"):
             log(f"SKIP_MODE: {path} mode={mode}", "DEBUG")
             continue
@@ -997,7 +1077,10 @@ def flush(cfg):
                 log(f"SCRUBBED_UPPER: specials={len(bad)} under {upper}")
 
             # actual flush
-            ok = rsync_upper_to_lower(str(upper), str(lower))
+            ok = rsync_upper_to_lower(str(upper), str(lower),
+                                      enforce_uid=entry.uid,
+                                      enforce_gid=entry.gid,
+                                      enforce_mode=entry.perms)
 
         except Exception as e:
             errors += 1
@@ -1061,7 +1144,8 @@ def unmount(cfg):
     ws_type = get_workspace_type(cfg)
     items = list(parse_paths(cfg.get("paths","")))
     # 1) remove any overlay mounted ON the lower bind
-    for path, _ in items:
+    for entry in items:
+        path = entry.path
         name = sanitize_name(str(Path(path).resolve()))
         lower = lower_bind_for(ws_root, name)
         if is_overlay_mounted(lower):
@@ -1069,7 +1153,7 @@ def unmount(cfg):
             force_unmount_with_retry(lower)
 
     # 2) unmount main overlays deepest-first
-    paths = [Path(p).resolve() for p, _ in items]
+    paths = [Path(entry.path).resolve() for entry in items]
     for p in sorted(paths, key=lambda x: len(str(x)), reverse=True):
         name = sanitize_name(str(p))
         lower = lower_bind_for(ws_root, name)
@@ -1154,7 +1238,8 @@ def cmd_status():
     # workspace is up; now see if any overlays are mounted
     items = list(parse_paths(cfg.get("paths", "")))
     active = 0
-    for path, _mode in items:
+    for entry in items:
+        path = entry.path
         p = Path(path).resolve()
         if is_overlay_mounted(p):
             active += 1
@@ -1204,7 +1289,8 @@ def cmd_df():
         print(f"{str(ws_root):<42} {ws_type:<7}  {'-':<5}  {used:>10}  size={total} avail={free} use%={pct}%")
 
         # per-path lines
-        for path, mode in items:
+        for entry in items:
+            path, mode = entry.path, entry.mode
             p = Path(path).resolve()
             name = sanitize_name(str(p))
             lower = lower_bind_for(ws_root, name)
