@@ -209,6 +209,9 @@ writecache_setup_service_enable:
     - enable: True
     - require:
       - file: omv-writecache-setup_service
+    - watch:
+      - file: configure_writecache_config
+      - file: omv-writecache-setup_service
 
 {% else %}
 
