@@ -1,3 +1,10 @@
+openmediavault-writecache (8.1.4) stable; urgency=low
+
+  * Fix service starting issue
+  * Fix path parsing when using owner and mode
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Sat, 14 Mar 2026 14:06:05 +0000
+
 openmediavault-writecache (8.1.3) stable; urgency=low
 
   * Add optional owner= and mode= attributes to path policy config
