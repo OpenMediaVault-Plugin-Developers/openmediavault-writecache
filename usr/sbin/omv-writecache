@@ -21,7 +21,7 @@ try:
 except Exception:
     yaml = None
 
-SCRIPT_VERSION = "0.1.1"
+SCRIPT_VERSION = "0.1.2"
 CONFIG = Path("/etc/omv-writecache/config.yaml")
 
 # Workspace root for overlay metadata (lower binds, upperdirs, workdirs).
@@ -293,6 +293,7 @@ def drop_pending_changes(cfg: dict):
             if upper.exists():
                 shutil.rmtree(upper, ignore_errors=True)
             upper.mkdir(parents=True, exist_ok=True)
+            sync_upper_attrs(upper, p, entry.uid, entry.gid, entry.perms)
 
             if work.exists():
                 shutil.rmtree(work, ignore_errors=True)
@@ -617,6 +618,42 @@ def parse_paths(paths_text):
 def sanitize_name(p):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", p.strip("/"))
 
+def sync_upper_attrs(upper: Path, target: Path,
+                     enforce_uid=None, enforce_gid=None, enforce_mode=None):
+    """
+    Set the upper directory's own mode/uid/gid so that overlayfs exposes the
+    correct permissions on the overlay root inode.
+
+    overlayfs derives the root directory attributes from the upper directory
+    itself, so a freshly-created upper (root:root 0755) would make the mounted
+    path appear as root:root 0755 regardless of the real directory's settings.
+
+    Priority:
+      1. enforce_* values from the path-policy entry (owner=/mode= attributes)
+      2. The real target path's current stat
+    Only applied when the upper directory is empty (no pending overlay data)
+    so that intentional permission changes captured in an existing upper layer
+    are not overwritten.
+    """
+    try:
+        if any(upper.iterdir()):
+            return  # upper has overlay content; don't clobber its attrs
+        if enforce_uid is not None or enforce_gid is not None or enforce_mode is not None:
+            t_stat = target.stat()
+            uid  = enforce_uid  if enforce_uid  is not None else t_stat.st_uid
+            gid  = enforce_gid  if enforce_gid  is not None else t_stat.st_gid
+            mode = enforce_mode if enforce_mode is not None else stat.S_IMODE(t_stat.st_mode)
+        else:
+            t_stat = target.stat()
+            uid  = t_stat.st_uid
+            gid  = t_stat.st_gid
+            mode = stat.S_IMODE(t_stat.st_mode)
+        os.chmod(upper, mode)
+        os.chown(upper, uid, gid)
+        log(f"UPPER_ATTR_SYNC: {upper} uid={uid} gid={gid} mode={oct(mode)}", "DEBUG")
+    except Exception as e:
+        log(f"UPPER_ATTR_SYNC_WARN: {upper} - {e}", "WARN")
+
 def is_overlay_mounted(path: Path) -> bool:
     mounts = get_mounts()
     return any(m["path"] == str(path) and m["fstype"] == "overlay" for m in mounts)
@@ -817,6 +854,7 @@ def mount_overlays(cfg):
         work = ws_root / name / "work"
         upper.mkdir(parents=True, exist_ok=True)
         work.mkdir(parents=True, exist_ok=True)
+        sync_upper_attrs(upper, p, entry.uid, entry.gid, entry.perms)
         changed, bad = scrub_bad_specials(upper)
         if changed:
             log(f"SCRUBBED_BAD_SPECIALS: {len(bad)} removed under {upper}")
@@ -1114,6 +1152,7 @@ def flush(cfg):
             if upper.exists():
                 shutil.rmtree(upper, ignore_errors=True)
             upper.mkdir(parents=True, exist_ok=True)
+            sync_upper_attrs(upper, p, entry.uid, entry.gid, entry.perms)
             log(f"RECREATED_UPPERDIR: {upper}")
 
             # Remove and recreate work directory
