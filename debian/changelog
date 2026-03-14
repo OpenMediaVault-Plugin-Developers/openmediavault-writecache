@@ -1,3 +1,10 @@
+openmediavault-writecache (8.1.5) stable; urgency=low
+
+  * Fix overlay root showing root:root 0755 instead of real directory permissions
+  * Sync upper directory ownership/mode from target path (or owner=/mode= attributes) before mounting overlay
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Sat, 14 Mar 2026 15:35:00 +0000
+
 openmediavault-writecache (8.1.4) stable; urgency=low
 
   * Fix service starting issue
