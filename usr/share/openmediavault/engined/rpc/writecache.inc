@@ -53,7 +53,7 @@ class OMVRpcServiceWriteCache extends \OMV\Rpc\ServiceAbstract
         $this->validateMethodContext($context, ["role" => OMV_ROLE_ADMINISTRATOR]);
         $db = \OMV\Config\Database::getInstance();
         // fix paths
-        $ppaths = str_replace([',',':'], PHP_EOL, $params['paths']);
+        $ppaths = str_replace([','], PHP_EOL, $params['paths']);
         $paths = explode(PHP_EOL, $ppaths);
         $pathsT = array_map("trim", $paths);
         $pathsF = array_filter($pathsT);
