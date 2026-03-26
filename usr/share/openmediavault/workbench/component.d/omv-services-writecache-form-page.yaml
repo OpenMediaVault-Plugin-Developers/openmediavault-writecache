@@ -24,6 +24,21 @@ data:
         name: sharedfolderref
         label: _("Workspace folder")
         hint: _("Used to store temporary writecache changes.")
+        hasEmptyOption: true
+        validators:
+          custom:
+            - constraint:
+                operator: or
+                arg0:
+                  operator: truthy
+                  arg0:
+                    prop: use_tmpfs
+                arg1:
+                  operator: ne
+                  arg0:
+                    prop: sharedfolderref
+                  arg1: ""
+              errorData: _("A workspace shared folder must be selected when not using system memory.")
         modifiers:
           - type: visible
             constraint:

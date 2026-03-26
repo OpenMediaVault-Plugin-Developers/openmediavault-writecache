@@ -65,6 +65,9 @@ class OMVRpcServiceWriteCache extends \OMV\Rpc\ServiceAbstract
             $params['sharedfolderref'] = '';
         } else {
             $params['tmpfs_size'] = '0%';
+            if (empty($params['sharedfolderref'])) {
+                throw new \OMV\Exception(gettext("A workspace shared folder must be selected when not using system memory."));
+            }
         }
         $object = $db->get("conf.service.writecache");
         // check to see if use_tmpfs changed.
