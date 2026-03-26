@@ -3,6 +3,9 @@
 # This file is distributed under the same license as the openmediavault-writecache package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
 # 
+# Translators:
+# Chente OMV, 2026
+# 
 #, fuzzy
 msgid ""
 msgstr ""
@@ -10,30 +13,31 @@ msgstr ""
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-01-10 21:31+0000\n"
 "PO-Revision-Date: 2025-08-17 20:57+0000\n"
-"Language-Team: Spanish (Spain) (https://app.transifex.com/openmediavault-plugin-developers/teams/1854/es_ES/)\n"
+"Last-Translator: Chente OMV, 2026\n"
+"Language-Team: Spanish (https://app.transifex.com/openmediavault-plugin-developers/teams/1854/es/)\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Language: es_ES\n"
+"Language: es\n"
 "Plural-Forms: nplurals=3; plural=n == 1 ? 0 : n != 0 && n % 1000000 == 0 ? 1 : 2;\n"
 
 msgid "Date & Time"
-msgstr ""
+msgstr "Fecha y hora"
 
 msgid "Details"
-msgstr ""
+msgstr "Detalles"
 
 msgid "Enabled"
-msgstr ""
+msgstr "Habilitado"
 
 msgid "Event"
-msgstr ""
+msgstr "Evento"
 
 msgid "Flush"
-msgstr ""
+msgstr "Forzar escritura"
 
 msgid "Flush daily"
-msgstr ""
+msgstr "Forzar escritura diariamente"
 
 msgid "Flush hourly"
 msgstr ""
@@ -42,7 +46,7 @@ msgid "Flush on boot"
 msgstr ""
 
 msgid "Flush on shutdown"
-msgstr ""
+msgstr "Forzar escritura al apagar"
 
 msgid "Hour"
 msgstr ""
@@ -55,42 +59,44 @@ msgid ""
 msgstr ""
 
 msgid "Journal storage"
-msgstr ""
+msgstr "Almacenamiento de registro"
 
 msgid "Level"
-msgstr ""
+msgstr "Nivel"
 
 msgid "Minute"
 msgstr ""
 
 msgid "One entry per line <path> = drop|flush"
-msgstr ""
+msgstr "Una entrada por línea = drop|flush"
 
 msgid "Overlay paths and policy"
-msgstr ""
+msgstr "Rutas superpuestas y política"
 
 msgid "Rotate & Flush"
-msgstr ""
+msgstr "Rotar y volcar"
 
 msgid "Rotate on daily flush"
-msgstr ""
+msgstr "Rotar durante el volcado diario"
 
 msgid "Rotate on shutdown"
-msgstr ""
+msgstr "Rotar durante el apagado"
 
 msgid "Run journalctl rotate and sync before flush"
-msgstr ""
+msgstr "Ejecutar journalctl rotate y sync antes del volcado"
 
 msgid "Running manual flush ..."
-msgstr ""
+msgstr "Ejecutando volcado manual …"
 
 msgid "Running manual rotate and flush ..."
-msgstr ""
+msgstr "Ejecutando rotación y volcado manual …"
 
 msgid ""
 "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, "
 "25%."
 msgstr ""
+"Tamaño para /run/omv-writecache tmpfs. Acepta %, o sufijos M/G; por ejemplo:"
+" 512M, 2G, 25%."
 
 msgid "Status"
 msgstr ""
@@ -105,22 +111,22 @@ msgid "Workspace folder"
 msgstr ""
 
 msgid "Write Cache"
-msgstr ""
+msgstr "Write Cache"
 
 msgid "Write Cache settings"
-msgstr ""
+msgstr "Configuración de Write Cache"
 
 msgid "WriteCache"
-msgstr ""
+msgstr "WriteCache"
 
 msgid "auto"
-msgstr ""
+msgstr "auto"
 
 msgid "persistent (disk)"
-msgstr ""
+msgstr "Persistente (disco)"
 
 msgid "tmpfs size"
-msgstr ""
+msgstr "Tamaño de tmpfs"
 
 msgid "volatile (RAM)"
-msgstr ""
+msgstr "volátil (RAM)"
