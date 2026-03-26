@@ -1,3 +1,9 @@
+openmediavault-writecache (8.1.6) stable; urgency=low
+
+  * Require a sharedfolder to be set when system memory is unchecked
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Thu, 26 Mar 2026 10:51:56 +0000
+
 openmediavault-writecache (8.1.5) stable; urgency=low
 
   * Fix overlay root showing root:root 0755 instead of real directory permissions
