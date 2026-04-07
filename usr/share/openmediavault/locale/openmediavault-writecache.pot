@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: openmediavault-writecache\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-01-10 21:31+0000\n"
+"POT-Creation-Date: 2026-04-07 13:02+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -16,6 +16,9 @@ msgstr ""
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+
+msgid "A workspace shared folder must be selected when not using system memory."
+msgstr ""
 
 msgid "Date & Time"
 msgstr ""
@@ -59,9 +62,6 @@ msgstr ""
 msgid "Minute"
 msgstr ""
 
-msgid "One entry per line <path> = drop|flush"
-msgstr ""
-
 msgid "Overlay paths and policy"
 msgstr ""
 
@@ -81,6 +81,9 @@ msgid "Running manual flush ..."
 msgstr ""
 
 msgid "Running manual rotate and flush ..."
+msgstr ""
+
+msgid "Services to reload/restart after flush"
 msgstr ""
 
 msgid "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, 25%."

@@ -11,7 +11,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: openmediavault-writecache\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-01-10 21:31+0000\n"
+"POT-Creation-Date: 2026-04-07 13:02+0000\n"
 "PO-Revision-Date: 2025-08-17 20:57+0000\n"
 "Last-Translator: Marcelo Esteves <marcelopge@gmail.com>, 2025\n"
 "Language-Team: Portuguese (Brazil) (https://app.transifex.com/openmediavault-plugin-developers/teams/1854/pt_BR/)\n"
@@ -20,6 +20,10 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Language: pt_BR\n"
 "Plural-Forms: nplurals=3; plural=(n == 0 || n == 1) ? 0 : n != 0 && n % 1000000 == 0 ? 1 : 2;\n"
+
+msgid ""
+"A workspace shared folder must be selected when not using system memory."
+msgstr ""
 
 msgid "Date & Time"
 msgstr ""
@@ -67,9 +71,6 @@ msgstr ""
 msgid "Minute"
 msgstr ""
 
-msgid "One entry per line <path> = drop|flush"
-msgstr "Uma entrada por linha <path> = descartar|limpar"
-
 msgid "Overlay paths and policy"
 msgstr "Caminhos e políticas de sobreposição"
 
@@ -89,6 +90,9 @@ msgid "Running manual flush ..."
 msgstr ""
 
 msgid "Running manual rotate and flush ..."
+msgstr ""
+
+msgid "Services to reload/restart after flush"
 msgstr ""
 
 msgid ""

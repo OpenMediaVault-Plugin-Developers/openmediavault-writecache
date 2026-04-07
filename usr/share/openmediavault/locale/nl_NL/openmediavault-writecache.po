@@ -11,7 +11,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: openmediavault-writecache\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-01-10 21:31+0000\n"
+"POT-Creation-Date: 2026-04-07 13:02+0000\n"
 "PO-Revision-Date: 2025-08-17 20:57+0000\n"
 "Last-Translator: Stephan Paternotte <stephan@paternottes.net>, 2026\n"
 "Language-Team: Dutch (https://app.transifex.com/openmediavault-plugin-developers/teams/1854/nl/)\n"
@@ -20,6 +20,10 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Language: nl\n"
 "Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+msgid ""
+"A workspace shared folder must be selected when not using system memory."
+msgstr ""
 
 msgid "Date & Time"
 msgstr "Datum & Tijd"
@@ -43,7 +47,7 @@ msgid "Flush hourly"
 msgstr "Elk uur doorspoelen"
 
 msgid "Flush on boot"
-msgstr "Bij opstart doorspoelen"
+msgstr "Doorspoelen bij opstarten"
 
 msgid "Flush on shutdown"
 msgstr "Doorspoelen bij afsluiten"
@@ -71,9 +75,6 @@ msgstr "Niveau"
 msgid "Minute"
 msgstr "Minuut"
 
-msgid "One entry per line <path> = drop|flush"
-msgstr "Een item per regel <path> = dropflush"
-
 msgid "Overlay paths and policy"
 msgstr "Overlaypaden en beleid"
 
@@ -94,6 +95,9 @@ msgstr "Handmatig doorspoelen…"
 
 msgid "Running manual rotate and flush ..."
 msgstr "Handmatig roteren en doorspoelen…"
+
+msgid "Services to reload/restart after flush"
+msgstr ""
 
 msgid ""
 "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, "
