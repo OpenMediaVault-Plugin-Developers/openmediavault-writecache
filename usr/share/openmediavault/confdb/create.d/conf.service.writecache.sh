@@ -32,6 +32,7 @@ if ! omv_config_exists "${xpath}"; then
 /var/lib/monit = flush
 /var/log = flush
 /var/tmp = drop"
+  omv_config_add_key "${xpath}" "services" ""
 fi
 
 exit 0

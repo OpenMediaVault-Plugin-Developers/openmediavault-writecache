@@ -59,6 +59,13 @@ class OMVRpcServiceWriteCache extends \OMV\Rpc\ServiceAbstract
         $pathsF = array_filter($pathsT);
         $pathsU = array_unique($pathsF);
         $params["paths"] = implode(PHP_EOL, $pathsU);
+        // fix services
+        $pservices = str_replace([','], PHP_EOL, $params['services']);
+        $services = explode(PHP_EOL, $pservices);
+        $servicesT = array_map("trim", $services);
+        $servicesF = array_filter($servicesT);
+        $servicesU = array_unique($servicesF);
+        $params["services"] = implode(PHP_EOL, $servicesU);
         // fix disabled settings
         if ($params['use_tmpfs']) {
             $params['flush_on_boot'] = false;
@@ -93,7 +100,7 @@ class OMVRpcServiceWriteCache extends \OMV\Rpc\ServiceAbstract
         return $this->execBgProc(function($bgStatusFilename, $bgOutputFilename)
             use ($params) {
                 $arg = boolval($params['rotate']) ? 'rotateflush' : 'flush';
-                $cmd = new \OMV\System\Process('omv-writecache', $arg);
+                $cmd = new \OMV\System\Process('omv-writecache', $arg, '--restart');
                 $cmd->setRedirect2to1();
                 $cmdLine = $cmd->getCommandLine();
                 if (0 !== $this->exec($cmdLine, $output, $bgOutputFilename)) {

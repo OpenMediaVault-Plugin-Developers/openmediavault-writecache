@@ -15,6 +15,7 @@ from pathlib import Path
 from collections import namedtuple
 
 PathEntry = namedtuple("PathEntry", ["path", "mode", "uid", "gid", "perms"])
+ServiceEntry = namedtuple("ServiceEntry", ["name", "action"])
 
 try:
     import yaml  # type: ignore
@@ -62,6 +63,7 @@ ARRAY_LOCK = None
 _LOCK_FD = None
 
 NO_FLUSH = False
+RESTART_SERVICES = False
 LOG_ENABLED = True
 
 def log(msg: str, level: str = "INFO"):
@@ -521,6 +523,7 @@ def load_config():
         "flush_on_shutdown": True,
         "flush_daily": False,
         "paths": "/var/log = drop\n/var/tmp = drop\n/var/cache/apt/archives = drop\n/var/lib/apt/lists = drop\n/var/lib/dpkg/updates = flush\n",
+        "services": "",
     }
     if not CONFIG.exists() or yaml is None:
         log("CONFIG: Using defaults", "DEBUG")
@@ -614,6 +617,55 @@ def parse_paths(paths_text):
             res.append(entry)
             seen.add(entry.path)
     return res
+
+def parse_services(services_text):
+    """Parse the services config block into a list of ServiceEntry namedtuples.
+
+    Each non-comment line has the form:
+        service_name = reload|restart
+    """
+    items = []
+    seen = set()
+    for line in services_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            name, _, action = line.partition("=")
+            name = name.strip()
+            action = action.strip().lower()
+            if action not in ("reload", "restart"):
+                log(f"PARSE_SERVICE_WARN: unknown action '{action}' for '{name}' (expected reload or restart)", "WARN")
+                continue
+        else:
+            name = line.strip()
+            action = "restart"
+        if name and name not in seen:
+            items.append(ServiceEntry(name, action))
+            seen.add(name)
+    return items
+
+def restart_services(cfg):
+    """Reload or restart services listed in cfg['services'] after a non-shutdown flush."""
+    services_text = cfg.get("services", "") or ""
+    entries = parse_services(services_text)
+    if not entries:
+        return
+    for entry in entries:
+        try:
+            log(f"SERVICE_{entry.action.upper()}: {entry.name}")
+            result = subprocess.run(
+                ["systemctl", entry.action, entry.name],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            if result.returncode != 0:
+                log(f"SERVICE_{entry.action.upper()}_FAILED: {entry.name} - {result.stdout.strip()}", "ERROR")
+            else:
+                log(f"SERVICE_{entry.action.upper()}_OK: {entry.name}")
+        except Exception as e:
+            log(f"SERVICE_{entry.action.upper()}_ERROR: {entry.name} - {e}", "ERROR")
 
 def sanitize_name(p):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", p.strip("/"))
@@ -1238,6 +1290,8 @@ def cmd_flush():
     log("FLUSH_CMD: Starting flush command")
     cfg = load_config()
     ok = flush(cfg)
+    if RESTART_SERVICES:
+        restart_services(cfg)
     sys.exit(0 if ok else 1)
 
 def cmd_rotateflush():
@@ -1353,11 +1407,11 @@ def cmd_df():
 def main():
     if len(sys.argv) < 2:
         print(
-            "Usage: omv-writecache <command> [--no-flush]\n"
+            "Usage: omv-writecache <command> [--no-flush] [--restart]\n"
             "Commands:\n"
             "  mount\n"
-            "  rotateflush\n"
-            "  flush\n"
+            "  rotateflush [--restart]\n"
+            "  flush [--restart]\n"
             "  unmount [--no-flush]\n"
             "  rotateunmount\n"
             "  remount\n"
@@ -1368,6 +1422,7 @@ def main():
         sys.exit(2)
 
     global NO_FLUSH
+    global RESTART_SERVICES
     global LOG_ENABLED
 
     args = sys.argv[1:]
@@ -1376,6 +1431,10 @@ def main():
     if "--no-flush" in args:
         NO_FLUSH = True
         args.remove("--no-flush")
+
+    if "--restart" in args:
+        RESTART_SERVICES = True
+        args.remove("--restart")
 
     # Identify commands that should not lock and should not log
     no_lock_no_log_cmds = {"df", "status", "version", "-v", "--version"}
@@ -1402,6 +1461,8 @@ def main():
         cmdline = f"omv-writecache {cmd}"
         if NO_FLUSH:
             cmdline += " --no-flush"
+        if RESTART_SERVICES:
+            cmdline += " --restart"
         log(f"SCRIPT_START: {cmdline}")
 
     if cmd == "mount":

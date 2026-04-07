@@ -1,3 +1,9 @@
+openmediavault-writecache (8.1.7) UNRELEASED; urgency=medium
+
+  * Add service list to restart/reload on flush
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Tue, 07 Apr 2026 12:43:51 +0000
+
 openmediavault-writecache (8.1.6) stable; urgency=low
 
   * Require a sharedfolder to be set when system memory is unchecked

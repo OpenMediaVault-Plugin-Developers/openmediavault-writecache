@@ -80,6 +80,10 @@ configure_writecache_config:
 {%- for p in config.get('paths', '').splitlines() if p.strip() %}
           {{ p.strip() }}
 {%- endfor %}
+        services: |
+{%- for s in config.get('services', '').splitlines() if s.strip() %}
+          {{ s.strip() }}
+{%- endfor %}
     - user: root
     - group: root
     - mode: 0644
@@ -232,10 +236,10 @@ omv_writecache_cron:
         {{ pillar['headers']['auto_generated'] }}
         {{ pillar['headers']['warning'] }}
 {%- if daily_action %}
-        {{ config.minute }} {{ config.hour }} * * * root /usr/sbin/omv-writecache {{ daily_action }} >/dev/null 2>&1
+        {{ config.minute }} {{ config.hour }} * * * root /usr/sbin/omv-writecache {{ daily_action }} --restart >/dev/null 2>&1
 {%- endif %}
 {%- if flush_hourly %}
-        @hourly root /usr/sbin/omv-writecache flush >/dev/null 2>&1
+        @hourly root /usr/sbin/omv-writecache flush --restart >/dev/null 2>&1
 {%- endif %}
     - user: root
     - group: root
