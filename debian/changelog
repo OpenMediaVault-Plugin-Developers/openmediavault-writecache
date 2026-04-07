@@ -1,6 +1,10 @@
 openmediavault-writecache (8.1.7) UNRELEASED; urgency=medium
 
-  * Add service list to restart/reload on flush
+  * Add services field to reload, restart, or stop/start services after a flush
+  * Add stopstart action to stop a service before flush and start it after
+  * Service restarts require --restart flag; not triggered on shutdown flush
+  * Cron flush jobs pass --restart automatically
+  * Flush and Rotate & Flush buttons in the UI trigger service restarts
 
  -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Tue, 07 Apr 2026 12:43:51 +0000
 

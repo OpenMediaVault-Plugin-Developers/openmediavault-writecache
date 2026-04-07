@@ -634,8 +634,8 @@ def parse_services(services_text):
             name, _, action = line.partition("=")
             name = name.strip()
             action = action.strip().lower()
-            if action not in ("reload", "restart"):
-                log(f"PARSE_SERVICE_WARN: unknown action '{action}' for '{name}' (expected reload or restart)", "WARN")
+            if action not in ("reload", "restart", "stopstart"):
+                log(f"PARSE_SERVICE_WARN: unknown action '{action}' for '{name}' (expected reload, restart, or stopstart)", "WARN")
                 continue
         else:
             name = line.strip()
@@ -645,27 +645,42 @@ def parse_services(services_text):
             seen.add(name)
     return items
 
+def _run_systemctl(action, name):
+    """Run systemctl <action> <name>, log result. Returns True on success."""
+    label = f"SERVICE_{action.upper()}"
+    try:
+        log(f"{label}: {name}")
+        result = subprocess.run(
+            ["systemctl", action, name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        if result.returncode != 0:
+            log(f"{label}_FAILED: {name} - {result.stdout.strip()}", "ERROR")
+            return False
+        log(f"{label}_OK: {name}")
+        return True
+    except Exception as e:
+        log(f"{label}_ERROR: {name} - {e}", "ERROR")
+        return False
+
+def stop_services(cfg):
+    """Stop services with action=stopstart before a flush."""
+    services_text = cfg.get("services", "") or ""
+    for entry in parse_services(services_text):
+        if entry.action == "stopstart":
+            _run_systemctl("stop", entry.name)
+
 def restart_services(cfg):
-    """Reload or restart services listed in cfg['services'] after a non-shutdown flush."""
+    """Reload, restart, or start (stopstart) services after a non-shutdown flush."""
     services_text = cfg.get("services", "") or ""
     entries = parse_services(services_text)
     if not entries:
         return
     for entry in entries:
-        try:
-            log(f"SERVICE_{entry.action.upper()}: {entry.name}")
-            result = subprocess.run(
-                ["systemctl", entry.action, entry.name],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            if result.returncode != 0:
-                log(f"SERVICE_{entry.action.upper()}_FAILED: {entry.name} - {result.stdout.strip()}", "ERROR")
-            else:
-                log(f"SERVICE_{entry.action.upper()}_OK: {entry.name}")
-        except Exception as e:
-            log(f"SERVICE_{entry.action.upper()}_ERROR: {entry.name} - {e}", "ERROR")
+        action = "start" if entry.action == "stopstart" else entry.action
+        _run_systemctl(action, entry.name)
 
 def sanitize_name(p):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", p.strip("/"))
@@ -1289,6 +1304,8 @@ def cmd_mount():
 def cmd_flush():
     log("FLUSH_CMD: Starting flush command")
     cfg = load_config()
+    if RESTART_SERVICES:
+        stop_services(cfg)
     ok = flush(cfg)
     if RESTART_SERVICES:
         restart_services(cfg)
