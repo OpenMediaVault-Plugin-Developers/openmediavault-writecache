@@ -97,7 +97,7 @@ configure_writecache_journald_dir:
 
 configure_writecache_journald:
   file.managed:
-    - name: /etc/systemd/journald.conf.d/10-writecache.conf
+    - name: /etc/systemd/journald.conf.d/99-writecache.conf
     - contents: |
         {{ pillar['headers']['auto_generated'] }}
         {{ pillar['headers']['warning'] }}

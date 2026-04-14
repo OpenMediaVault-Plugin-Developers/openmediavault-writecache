@@ -9,7 +9,7 @@ remove_action() {
   dpkg-trigger update-workbench
   rm -rf /etc/omv-writecache
 
-  conf="/etc/systemd/journald.conf.d/10-writecache.conf"
+  conf="/etc/systemd/journald.conf.d/99-writecache.conf"
   if [ -e "${conf}" ]; then
     rm -f "${conf}" || true
     systemctl reload systemd-journald 2>/dev/null || systemctl try-restart systemd-journald || true
