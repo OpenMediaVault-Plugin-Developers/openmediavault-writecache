@@ -1,3 +1,9 @@
+openmediavault-writecache (8.1.8) stable; urgency=low
+
+  * Rename journald config file
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Tue, 14 Apr 2026 22:49:08 +0000
+
 openmediavault-writecache (8.1.7) stable; urgency=low
 
   * Add services field to reload, restart, or stop/start services after a flush
