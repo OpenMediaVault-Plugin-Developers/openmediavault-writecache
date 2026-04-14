@@ -95,9 +95,13 @@ configure_writecache_journald_dir:
     - group: root
     - dir_mode: 0755
 
+remove_old_writecache_journald:
+  file.absent:
+    - name: /etc/systemd/journald.conf.d/10-writecache.conf
+
 configure_writecache_journald:
   file.managed:
-    - name: /etc/systemd/journald.conf.d/10-writecache.conf
+    - name: /etc/systemd/journald.conf.d/50-writecache.conf
     - contents: |
         {{ pillar['headers']['auto_generated'] }}
         {{ pillar['headers']['warning'] }}
