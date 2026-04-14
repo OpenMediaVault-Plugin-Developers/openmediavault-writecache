@@ -470,7 +470,7 @@ def run(cmd, check=True, quiet=False):
     return res
 
 def ensure_persistent_journal():
-    conf_path = "/etc/systemd/journald.conf.d/10-writecache.conf"
+    conf_path = "/etc/systemd/journald.conf.d/99-writecache.conf"
     journal_dir = "/var/log/journal"
 
     # Check if Storage=persistent is set
