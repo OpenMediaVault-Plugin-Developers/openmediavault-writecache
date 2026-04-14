@@ -3,6 +3,9 @@
 # This file is distributed under the same license as the openmediavault-writecache package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
 # 
+# Translators:
+# bounkirdni_2025, 2026
+# 
 #, fuzzy
 msgid ""
 msgstr ""
@@ -10,6 +13,7 @@ msgstr ""
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-04-07 13:02+0000\n"
 "PO-Revision-Date: 2025-08-17 20:57+0000\n"
+"Last-Translator: bounkirdni_2025, 2026\n"
 "Language-Team: Lao (Laos) (https://app.transifex.com/openmediavault-plugin-developers/teams/1854/lo_LA/)\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
@@ -20,36 +24,37 @@ msgstr ""
 msgid ""
 "A workspace shared folder must be selected when not using system memory."
 msgstr ""
+"ຕ້ອງເລືອກໂຟນເດີແບ່ງປັນສຳລັບພື້ນທີ່ເຮັດວຽກ ເມື່ອບໍ່ໄດ້ໃຊ້ໜ່ວຍຄວາມຈຳລະບົບ."
 
 msgid "Date & Time"
-msgstr ""
+msgstr "ວັນທີ ແລະ ເວລາ"
 
 msgid "Details"
-msgstr ""
+msgstr "ລາຍລະອຽດ"
 
 msgid "Enabled"
-msgstr ""
+msgstr "ເປີດໃຊ້ງານ"
 
 msgid "Event"
-msgstr ""
+msgstr "ເຫດການ"
 
 msgid "Flush"
-msgstr ""
+msgstr "ລ້າງຂໍ້ມູນ"
 
 msgid "Flush daily"
-msgstr ""
+msgstr "ລ້າງຂໍ້ມູນປະຈຳວັນ"
 
 msgid "Flush hourly"
-msgstr ""
+msgstr "ລ້າງຂໍ້ມູນທຸກໆຊົ່ວໂມງ"
 
 msgid "Flush on boot"
-msgstr ""
+msgstr "ລ້າງຂໍ້ມູນຕອນເລີ່ມລະບົບ"
 
 msgid "Flush on shutdown"
-msgstr ""
+msgstr "ລ້າງຂໍ້ມູນຕອນປິດລະບົບ"
 
 msgid "Hour"
-msgstr ""
+msgstr "ຊົ່ວໂມງ"
 
 msgid ""
 "If checked, writecache will use system memory to store changes.<br/>If "
@@ -57,74 +62,80 @@ msgid ""
 "folder. Changes are not lost if the system reboots or shuts down "
 "unexpectedly."
 msgstr ""
+"ຫາກເລືອກ, writecache "
+"ຈະໃຊ້ໜ່ວຍຄວາມຈຳລະບົບເພື່ອເກັບການປ່ຽນແປງ.<br/>ຫາກບໍ່ເລືອກ, writecache "
+"ຈະເກັບການປ່ຽນແປງເຫຼົ່ານັ້ນໄວ້ໃນໂຟນເດີແບ່ງປັນທີ່ເລືອກ. ຂໍ້ມູນຈະບໍ່ສູນຫາຍ "
+"ຫາກລະບົບເລີ່ມໃໝ່ ຫຼື ປິດລົງຢ່າງກະທັນຫັນ."
 
 msgid "Journal storage"
-msgstr ""
+msgstr "ການເກັບຮັກສາບັນທຶກ (Journal)"
 
 msgid "Level"
-msgstr ""
+msgstr "ລະດັບ"
 
 msgid "Minute"
-msgstr ""
+msgstr "ນາທີ"
 
 msgid "Overlay paths and policy"
-msgstr ""
+msgstr "ເສັ້ນທາງ Overlay ແລະ ນະໂຍບາຍ"
 
 msgid "Rotate & Flush"
-msgstr ""
+msgstr "ໝູນວຽນ ແລະ ລ້າງຂໍ້ມູນ"
 
 msgid "Rotate on daily flush"
-msgstr ""
+msgstr "ໝູນວຽນເມື່ອລ້າງຂໍ້ມູນປະຈຳວັນ"
 
 msgid "Rotate on shutdown"
-msgstr ""
+msgstr "ໝູນວຽນເມື່ອປິດລະບົບ"
 
 msgid "Run journalctl rotate and sync before flush"
-msgstr ""
+msgstr "ເປີດໃຊ້ journalctl rotate ແລະ sync ກ່ອນລ້າງຂໍ້ມູນ"
 
 msgid "Running manual flush ..."
-msgstr ""
+msgstr "ກຳລັງລ້າງຂໍ້ມູນດ້ວຍຕົນເອງ ..."
 
 msgid "Running manual rotate and flush ..."
-msgstr ""
+msgstr "ກຳລັງໝູນວຽນ ແລະ ລ້າງຂໍ້ມູນດ້ວຍຕົນເອງ ..."
 
 msgid "Services to reload/restart after flush"
-msgstr ""
+msgstr "ບໍລິການທີ່ຈະເລີ່ມໃໝ່ຫຼັງຈາກລ້າງຂໍ້ມູນ"
 
 msgid ""
 "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, "
 "25%."
 msgstr ""
+"ຂະໜາດສຳລັບ /run/omv-writecache tmpfs. ຮອງຮັບ %, ຕົວອັກສອນຕໍ່ທ້າຍ M/G; "
+"ຕົວຢ່າງ: 512M, 2G, 25%."
 
 msgid "Status"
-msgstr ""
+msgstr "ສະຖານະ"
 
 msgid "Use system memory"
-msgstr ""
+msgstr "ໃຊ້ໜ່ວຍຄວາມຈຳລະບົບ"
 
 msgid "Used to store temporary writecache changes."
-msgstr ""
+msgstr "ໃຊ້ເພື່ອເກັບການປ່ຽນແປງຊົ່ວຄາວຂອງ writecache."
 
 msgid "Workspace folder"
-msgstr ""
+msgstr "ໂຟນເດີພື້ນທີ່ເຮັດວຽກ"
 
 msgid "Write Cache"
-msgstr ""
+msgstr "Write Cache"
 
 msgid "Write Cache settings"
-msgstr ""
+msgstr "ການຕັ້ງຄ່າ Write Cache"
 
 msgid "WriteCache"
-msgstr ""
+msgstr "WriteCache"
 
 msgid "auto"
-msgstr ""
+msgstr "ອັດຕະໂນມັດ"
 
 msgid "persistent (disk)"
-msgstr ""
+msgstr "ຖາວອນ (ດິສກ໌)"
 
 msgid "tmpfs size"
-msgstr ""
+msgstr "ຂະໜາດ tmpfs"
 
 msgid "volatile (RAM)"
-msgstr ""
+msgstr "ຊົ່ວຄາວ (RAM)"

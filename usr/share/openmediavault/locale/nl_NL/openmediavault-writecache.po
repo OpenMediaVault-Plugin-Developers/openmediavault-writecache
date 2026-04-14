@@ -24,6 +24,8 @@ msgstr ""
 msgid ""
 "A workspace shared folder must be selected when not using system memory."
 msgstr ""
+"Als het systeemgeheugen niet wordt gebruik, moet er een gedeelde "
+"werkruimtemap worden geselecteerd."
 
 msgid "Date & Time"
 msgstr "Datum & Tijd"
@@ -97,7 +99,7 @@ msgid "Running manual rotate and flush ..."
 msgstr "Handmatig roteren en doorspoelen…"
 
 msgid "Services to reload/restart after flush"
-msgstr ""
+msgstr "Diensten die na het doorspoelen opnieuw moeten worden geladen/gestart"
 
 msgid ""
 "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, "

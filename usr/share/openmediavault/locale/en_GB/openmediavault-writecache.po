@@ -24,6 +24,7 @@ msgstr ""
 msgid ""
 "A workspace shared folder must be selected when not using system memory."
 msgstr ""
+"A workspace shared folder must be selected when not using system memory."
 
 msgid "Date & Time"
 msgstr "Date & Time"
@@ -97,7 +98,7 @@ msgid "Running manual rotate and flush ..."
 msgstr "Running manual rotate and flush ..."
 
 msgid "Services to reload/restart after flush"
-msgstr ""
+msgstr "Services to reload/restart after flush"
 
 msgid ""
 "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, "
