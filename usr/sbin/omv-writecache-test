@@ -278,10 +278,11 @@ def ensure_script():
         sys.exit(1)
     os.chmod(SCRIPT_PATH, 0o755)
 
-def run_cmd(cmd: str) -> Tuple[bool, str]:
+def run_cmd(cmd: str, extra_args: Optional[List[str]] = None) -> Tuple[bool, str]:
     """
     Run omv-writecache subcommand from a safe cwd so unmount/remount
     won't invalidate the child's working directory.
+    extra_args is a list of additional flags, e.g. ["--restart", "--daily"].
     """
     # Resolve script path to an absolute path; fall back to /usr/sbin/omv-writecache
     sp = Path(SCRIPT_PATH)
@@ -294,7 +295,7 @@ def run_cmd(cmd: str) -> Tuple[bool, str]:
         sp = Path("/usr/sbin/omv-writecache")
 
     # Build command (use sudo if not root)
-    full_cmd = [str(sp), cmd]
+    full_cmd = [str(sp), cmd] + (extra_args or [])
     if os.geteuid() != 0:
         full_cmd = ["sudo"] + full_cmd
 
@@ -1174,6 +1175,143 @@ class WriteCacheTest:
                     pass
             return False
 
+    def test_parse_services_daily_actions(self) -> bool:
+        """Verify that the new *daily action keywords are parsed without warnings."""
+        log_test("\n>>> Test: parse_services accepts daily action keywords", "INFO")
+        import yaml as _yaml
+
+        cfg_path = Path("/etc/omv-writecache/config.yaml")
+        original_text = cfg_path.read_text() if cfg_path.exists() else None
+        cfg = load_config()
+
+        test_services = (
+            "cron = restartdaily\n"
+            "rsyslog = reloaddaily\n"
+            "docker = stopdailystart\n"
+            "postfix = restart\n"
+            "nginx = reload\n"
+        )
+        cfg["services"] = test_services
+
+        sp = Path(SCRIPT_PATH) if Path(SCRIPT_PATH).exists() else Path("/usr/sbin/omv-writecache")
+        try:
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            cfg_path.write_text(_yaml.dump(cfg))
+            res = subprocess.run(
+                [str(sp), "status"],
+                capture_output=True, text=True, timeout=10, cwd="/"
+            )
+            out = (res.stdout or "") + (res.stderr or "")
+        except Exception as e:
+            log_test(f"Run error: {e}", "FAIL")
+            return False
+        finally:
+            if original_text is not None:
+                cfg_path.write_text(original_text)
+
+        # No PARSE_SERVICE_WARN should appear for the known actions
+        bad = [line for line in out.splitlines() if "PARSE_SERVICE_WARN" in line]
+        if bad:
+            for b in bad:
+                log_test(f"Unexpected parse warning: {b}", "FAIL")
+            return False
+
+        log_test("All daily action keywords parsed without warnings", "SUCCESS")
+        return True
+
+    def test_daily_flag_service_filtering(self) -> bool:
+        """
+        Verify that *daily service actions only fire when --daily is passed.
+        Injects fake service names into the config, runs flush with and without
+        --daily, and checks stdout for SERVICE_ log entries.
+        The service names are deliberately non-existent — the script logs the
+        attempt before calling systemctl, so entries appear regardless.
+        """
+        log_test("\n>>> Test: --daily flag controls *daily service actions", "INFO")
+        import yaml as _yaml
+
+        cfg_path = Path("/etc/omv-writecache/config.yaml")
+        original_text = cfg_path.read_text() if cfg_path.exists() else None
+        cfg = load_config()
+
+        always_svc = "omv-writecache-test-always"
+        daily_svc  = "omv-writecache-test-daily"
+        stop_svc   = "omv-writecache-test-stopdaily"
+
+        cfg["services"] = (
+            f"{always_svc} = restart\n"
+            f"{daily_svc} = restartdaily\n"
+            f"{stop_svc} = stopdailystart\n"
+        )
+
+        sp = Path(SCRIPT_PATH) if Path(SCRIPT_PATH).exists() else Path("/usr/sbin/omv-writecache")
+
+        def run_flush(daily: bool) -> str:
+            args = ["--restart", "--daily"] if daily else ["--restart"]
+            try:
+                res = subprocess.run(
+                    [str(sp), "flush"] + args,
+                    capture_output=True, text=True, timeout=60, cwd="/"
+                )
+                return (res.stdout or "") + (res.stderr or "")
+            except Exception as e:
+                return str(e)
+
+        ok = True
+        try:
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            cfg_path.write_text(_yaml.dump(cfg))
+
+            # --- Run without --daily ---
+            out_no_daily = run_flush(daily=False)
+            log_test("Ran flush --restart (no --daily)", "DEBUG")
+
+            always_acted = f"SERVICE_RESTART: {always_svc}" in out_no_daily
+            daily_acted  = f"SERVICE_RESTART: {daily_svc}"  in out_no_daily
+            stop_stopped = f"SERVICE_STOP: {stop_svc}"      in out_no_daily
+            stop_started = f"SERVICE_START: {stop_svc}"     in out_no_daily
+
+            log_test(f"  '{always_svc}' restarted (expected yes): {'OK' if always_acted else 'FAIL'}",
+                     "SUCCESS" if always_acted else "FAIL")
+            log_test(f"  '{daily_svc}' restarted (expected no):   {'OK' if not daily_acted else 'FAIL'}",
+                     "SUCCESS" if not daily_acted else "FAIL")
+            log_test(f"  '{stop_svc}' stopped (expected no):      {'OK' if not stop_stopped else 'FAIL'}",
+                     "SUCCESS" if not stop_stopped else "FAIL")
+            log_test(f"  '{stop_svc}' started (expected no):      {'OK' if not stop_started else 'FAIL'}",
+                     "SUCCESS" if not stop_started else "FAIL")
+
+            ok &= always_acted and not daily_acted and not stop_stopped and not stop_started
+
+            # --- Run with --daily ---
+            out_daily = run_flush(daily=True)
+            log_test("Ran flush --restart --daily", "DEBUG")
+
+            always_acted2 = f"SERVICE_RESTART: {always_svc}" in out_daily
+            daily_acted2  = f"SERVICE_RESTART: {daily_svc}"  in out_daily
+            stop_stopped2 = f"SERVICE_STOP: {stop_svc}"      in out_daily
+            stop_started2 = f"SERVICE_START: {stop_svc}"     in out_daily
+
+            log_test(f"  '{always_svc}' restarted (expected yes): {'OK' if always_acted2 else 'FAIL'}",
+                     "SUCCESS" if always_acted2 else "FAIL")
+            log_test(f"  '{daily_svc}' restarted (expected yes):  {'OK' if daily_acted2 else 'FAIL'}",
+                     "SUCCESS" if daily_acted2 else "FAIL")
+            log_test(f"  '{stop_svc}' stopped (expected yes):     {'OK' if stop_stopped2 else 'FAIL'}",
+                     "SUCCESS" if stop_stopped2 else "FAIL")
+            log_test(f"  '{stop_svc}' started (expected yes):     {'OK' if stop_started2 else 'FAIL'}",
+                     "SUCCESS" if stop_started2 else "FAIL")
+
+            ok &= always_acted2 and daily_acted2 and stop_stopped2 and stop_started2
+
+        finally:
+            if original_text is not None:
+                cfg_path.write_text(original_text)
+            elif cfg_path.exists():
+                cfg_path.unlink()
+
+        log_test("--daily service filtering: " + ("OK" if ok else "FAIL"),
+                 "SUCCESS" if ok else "FAIL")
+        return ok
+
     def test_dropin_file(self) -> bool:
         """Verify the workspace mount drop-in file exists with correct content (tmpfs only)."""
         log_test("\n>>> Test: workspace mount drop-in file", "INFO")
@@ -1573,6 +1711,8 @@ class WriteCacheTest:
             results["long_filenames"] = self.test_long_filenames()
             results["unicode_filenames"] = self.test_unicode_filenames()
             results["disk_exhaustion"] = self.test_disk_space_exhaustion()
+            results["parse_services_daily"] = self.test_parse_services_daily_actions()
+            results["daily_flag_filtering"] = self.test_daily_flag_service_filtering()
 
             # Create more files, then unmount
             log_test("\n>>> Prepare for unmount: create more files", "INFO")
