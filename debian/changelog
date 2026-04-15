@@ -1,3 +1,16 @@
+openmediavault-writecache (8.1.10) stable; urgency=low
+
+  * Add reloaddaily, restartdaily, and stopdailystart service actions that only run on daily flushes
+  * Add --daily flag to distinguish daily cron flush from hourly
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Tue, 15 Apr 2026 00:00:00 +0000
+
+openmediavault-writecache (8.1.9) stable; urgency=low
+
+  * Fix filename
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Tue, 14 Apr 2026 22:54:44 +0000
+
 openmediavault-writecache (8.1.8) stable; urgency=low
 
   * Rename journald config file
