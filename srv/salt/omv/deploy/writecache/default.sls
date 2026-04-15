@@ -240,7 +240,7 @@ omv_writecache_cron:
         {{ pillar['headers']['auto_generated'] }}
         {{ pillar['headers']['warning'] }}
 {%- if daily_action %}
-        {{ config.minute }} {{ config.hour }} * * * root /usr/sbin/omv-writecache {{ daily_action }} --restart >/dev/null 2>&1
+        {{ config.minute }} {{ config.hour }} * * * root /usr/sbin/omv-writecache {{ daily_action }} --restart --daily >/dev/null 2>&1
 {%- endif %}
 {%- if flush_hourly %}
         @hourly root /usr/sbin/omv-writecache flush --restart >/dev/null 2>&1

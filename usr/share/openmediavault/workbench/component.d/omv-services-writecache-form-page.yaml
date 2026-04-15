@@ -249,7 +249,7 @@ data:
         label: _("Services to reload/restart after flush")
         rows: 3
         monospace: true
-        hint: '_("One entry per line: &lt;service&gt; = reload|restart|stopstart<br/>Services listed here will be reloaded or restarted after a manual or scheduled flush (not on shutdown).<br/><b>stopstart</b> &mdash; stop before flush, start after flush<br/>Example:<br/>&nbsp;&nbsp;rsyslog = restart<br/>&nbsp;&nbsp;nginx = reload<br/>&nbsp;&nbsp;docker = stopstart")'
+        hint: '_("One entry per line: &lt;service&gt; = reload|restart|stopstart|reloaddaily|restartdaily|stopdailystart<br/>Services listed here will be reloaded or restarted after a manual or scheduled flush (not on shutdown).<br/><b>stopstart</b> &mdash; stop before flush, start after flush<br/><b>reloaddaily / restartdaily / stopdailystart</b> &mdash; same as above but only on daily scheduled flushes, not hourly<br/>Example:<br/>&nbsp;&nbsp;rsyslog = restartdaily<br/>&nbsp;&nbsp;nginx = reload<br/>&nbsp;&nbsp;docker = stopdailystart")'
       - type: textarea
         name: status
         label: _("Status")

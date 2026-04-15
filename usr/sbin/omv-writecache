@@ -64,6 +64,7 @@ _LOCK_FD = None
 
 NO_FLUSH = False
 RESTART_SERVICES = False
+DAILY_FLUSH = False
 LOG_ENABLED = True
 
 def log(msg: str, level: str = "INFO"):
@@ -470,7 +471,7 @@ def run(cmd, check=True, quiet=False):
     return res
 
 def ensure_persistent_journal():
-    conf_path = "/etc/systemd/journald.conf.d/10-writecache.conf"
+    conf_path = "/etc/systemd/journald.conf.d/50-writecache.conf"
     journal_dir = "/var/log/journal"
 
     # Check if Storage=persistent is set
@@ -622,7 +623,8 @@ def parse_services(services_text):
     """Parse the services config block into a list of ServiceEntry namedtuples.
 
     Each non-comment line has the form:
-        service_name = reload|restart
+        service_name = reload|restart|stopstart|reloaddaily|restartdaily|stopdailystart
+    The *daily variants only run when --daily is passed (i.e. on a daily flush).
     """
     items = []
     seen = set()
@@ -634,8 +636,8 @@ def parse_services(services_text):
             name, _, action = line.partition("=")
             name = name.strip()
             action = action.strip().lower()
-            if action not in ("reload", "restart", "stopstart"):
-                log(f"PARSE_SERVICE_WARN: unknown action '{action}' for '{name}' (expected reload, restart, or stopstart)", "WARN")
+            if action not in ("reload", "restart", "stopstart", "reloaddaily", "restartdaily", "stopdailystart"):
+                log(f"PARSE_SERVICE_WARN: unknown action '{action}' for '{name}' (expected reload, restart, stopstart, reloaddaily, restartdaily, or stopdailystart)", "WARN")
                 continue
         else:
             name = line.strip()
@@ -666,21 +668,33 @@ def _run_systemctl(action, name):
         return False
 
 def stop_services(cfg):
-    """Stop services with action=stopstart before a flush."""
+    """Stop services with action=stopstart/stopdailystart before a flush."""
     services_text = cfg.get("services", "") or ""
     for entry in parse_services(services_text):
         if entry.action == "stopstart":
             _run_systemctl("stop", entry.name)
+        elif entry.action == "stopdailystart" and DAILY_FLUSH:
+            _run_systemctl("stop", entry.name)
 
 def restart_services(cfg):
-    """Reload, restart, or start (stopstart) services after a non-shutdown flush."""
+    """Reload, restart, or start services after a non-shutdown flush.
+    Actions ending in 'daily' only run when DAILY_FLUSH is set."""
     services_text = cfg.get("services", "") or ""
     entries = parse_services(services_text)
     if not entries:
         return
     for entry in entries:
-        action = "start" if entry.action == "stopstart" else entry.action
-        _run_systemctl(action, entry.name)
+        if entry.action == "stopstart":
+            _run_systemctl("start", entry.name)
+        elif entry.action == "stopdailystart":
+            if DAILY_FLUSH:
+                _run_systemctl("start", entry.name)
+        elif entry.action in ("reloaddaily", "restartdaily"):
+            if DAILY_FLUSH:
+                action = "reload" if entry.action == "reloaddaily" else "restart"
+                _run_systemctl(action, entry.name)
+        else:
+            _run_systemctl(entry.action, entry.name)
 
 def sanitize_name(p):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", p.strip("/"))
@@ -1424,7 +1438,7 @@ def cmd_df():
 def main():
     if len(sys.argv) < 2:
         print(
-            "Usage: omv-writecache <command> [--no-flush] [--restart]\n"
+            "Usage: omv-writecache <command> [--no-flush] [--restart] [--daily]\n"
             "Commands:\n"
             "  mount\n"
             "  rotateflush [--restart]\n"
@@ -1440,6 +1454,7 @@ def main():
 
     global NO_FLUSH
     global RESTART_SERVICES
+    global DAILY_FLUSH
     global LOG_ENABLED
 
     args = sys.argv[1:]
@@ -1452,6 +1467,10 @@ def main():
     if "--restart" in args:
         RESTART_SERVICES = True
         args.remove("--restart")
+
+    if "--daily" in args:
+        DAILY_FLUSH = True
+        args.remove("--daily")
 
     # Identify commands that should not lock and should not log
     no_lock_no_log_cmds = {"df", "status", "version", "-v", "--version"}
@@ -1480,6 +1499,8 @@ def main():
             cmdline += " --no-flush"
         if RESTART_SERVICES:
             cmdline += " --restart"
+        if DAILY_FLUSH:
+            cmdline += " --daily"
         log(f"SCRIPT_START: {cmdline}")
 
     if cmd == "mount":
