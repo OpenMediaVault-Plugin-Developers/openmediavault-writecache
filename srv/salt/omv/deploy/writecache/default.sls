@@ -59,7 +59,7 @@ configure_writecache_config_dir:
     - name: /etc/omv-writecache
     - user: root
     - group: root
-    - mode: 0755
+    - mode: '0755'
 
 configure_writecache_config:
   file.managed:
@@ -86,14 +86,14 @@ configure_writecache_config:
 {%- endfor %}
     - user: root
     - group: root
-    - mode: 0644
+    - mode: '0644'
 
 configure_writecache_journald_dir:
   file.directory:
     - name: /etc/systemd/journald.conf.d
     - user: root
     - group: root
-    - dir_mode: 0755
+    - dir_mode: '0755'
 
 remove_old_writecache_journald:
   file.absent:
@@ -109,7 +109,7 @@ configure_writecache_journald:
         Storage={{ config.journald_storage }}
     - user: root
     - group: root
-    - mode: 0644
+    - mode: '0644'
 
 {# One state is enough: reload journald when the conf changes #}
 restart_journald_on_change:
@@ -247,7 +247,7 @@ omv_writecache_cron:
 {%- endif %}
     - user: root
     - group: root
-    - mode: 0644
+    - mode: '0644'
 
 {% else %}
 
