@@ -1,3 +1,13 @@
+openmediavault-writecache (8.2) stable; urgency=low
+
+  * Add zram (compressed RAM) workspace backing as a log2ram-style alternative to tmpfs
+  * New "Memory backing" option with configurable zram size and compression algorithm
+  * Allocate zram via hot_add and load the compression backend so early-boot mounts work on Proxmox kernels with zram-swap
+  * Populate the zram compression list dynamically from the running kernel
+  * Remount workspace automatically when the memory backing changes
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Sat, 31 May 2026 00:00:00 +0000
+
 openmediavault-writecache (8.1.10) stable; urgency=low
 
   * Add reloaddaily, restartdaily, and stopdailystart service actions that only run on daily flushes
