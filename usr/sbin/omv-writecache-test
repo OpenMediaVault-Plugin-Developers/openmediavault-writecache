@@ -15,6 +15,7 @@
 import os
 import sys
 import time
+import errno
 import shutil
 import subprocess
 import hashlib
@@ -231,7 +232,7 @@ def load_config() -> dict:
 def get_workspace_info(cfg: dict) -> Tuple[str, Path]:
     """Return (workspace_type, workspace_root). Defaults match omv-writecache."""
     ws_type = str(cfg.get("workspace_type", "tmpfs")).strip().lower()
-    if ws_type not in ("tmpfs", "path"):
+    if ws_type not in ("tmpfs", "path", "zram"):
         ws_type = "tmpfs"
     ws_root = Path(str(cfg.get("workspace_root", "/run/omv-writecache")).strip() or "/run/omv-writecache")
     return ws_type, ws_root
@@ -553,14 +554,23 @@ class WriteCacheTest:
         self.cleanup_tracker.track_file(fill_file)
 
         try:
-            # Create large file
-            with open(fill_file, "wb") as f:
-                chunk = b"x" * (1024 * 1024)  # 1MB chunks
-                written = 0
-                while written < fill_size:
-                    to_write = min(len(chunk), fill_size - written)
-                    f.write(chunk[:to_write])
-                    written += to_write
+            # Create large file. Reaching ENOSPC IS the condition under test: a
+            # fixed-size workspace (tmpfs or zram) must refuse writes gracefully
+            # rather than hang or corrupt. ext4-backed zram fills a few MB short
+            # of (total - used) due to filesystem metadata overhead, so treat
+            # ENOSPC during the fill as expected and continue to the checks below.
+            written = 0
+            try:
+                with open(fill_file, "wb") as f:
+                    chunk = b"x" * (1024 * 1024)  # 1MB chunks
+                    while written < fill_size:
+                        to_write = min(len(chunk), fill_size - written)
+                        f.write(chunk[:to_write])
+                        written += to_write
+            except OSError as e:
+                if e.errno != errno.ENOSPC:
+                    raise
+                log_test(f"Workspace exhausted as expected at {written / 1024 / 1024:.1f}MB (ENOSPC)", "DEBUG")
 
             log_test(f"Created {written / 1024 / 1024:.1f}MB fill file", "DEBUG")
 
@@ -1313,11 +1323,11 @@ class WriteCacheTest:
         return ok
 
     def test_dropin_file(self) -> bool:
-        """Verify the workspace mount drop-in file exists with correct content (tmpfs only)."""
+        """Verify the workspace mount drop-in file exists with correct content (RAM-backed: tmpfs/zram)."""
         log_test("\n>>> Test: workspace mount drop-in file", "INFO")
 
-        if self.workspace_type != "tmpfs":
-            log_test("Skip: workspace is not tmpfs", "WARN")
+        if self.workspace_type == "path":
+            log_test("Skip: workspace is disk-backed (path)", "WARN")
             return True
 
         dropin = Path(r"/etc/systemd/system/run-omv\x2dwritecache.mount.d/10-before-setup.conf")
@@ -1337,8 +1347,8 @@ class WriteCacheTest:
         """After mount, verify systemd applied the drop-in to the workspace mount unit."""
         log_test("\n>>> Test: workspace mount unit ordering (drop-in applied)", "INFO")
 
-        if self.workspace_type != "tmpfs":
-            log_test("Skip: workspace is not tmpfs", "WARN")
+        if self.workspace_type == "path":
+            log_test("Skip: workspace is disk-backed (path)", "WARN")
             return True
 
         ok_esc, unit_name, _ = run_sh(
@@ -1372,11 +1382,11 @@ class WriteCacheTest:
         return before_ok and no_umount_conflict
 
     def test_workspace_survives_flush(self) -> bool:
-        """Workspace tmpfs must remain mounted throughout a flush cycle."""
+        """RAM-backed workspace (tmpfs/zram) must remain mounted throughout a flush cycle."""
         log_test("\n>>> Test: workspace survives flush", "INFO")
 
-        if self.workspace_type != "tmpfs":
-            log_test("Skip: workspace is not tmpfs", "WARN")
+        if self.workspace_type == "path":
+            log_test("Skip: workspace is disk-backed (path)", "WARN")
             return True
 
         def is_mounted(path: Path) -> bool:

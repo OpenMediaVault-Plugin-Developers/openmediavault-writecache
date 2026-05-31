@@ -26,7 +26,8 @@
 {%   set tmpfs_size = '0%' %}
 {% endif %}
 
-{% set workspace_type = 'tmpfs' if use_tmpfs else 'path' %}
+{% set ram_backing = config.get('ram_backing', 'tmpfs') %}
+{% set workspace_type = (('zram' if ram_backing == 'zram' else 'tmpfs') if use_tmpfs else 'path') %}
 {% set workspace_root = '' if use_tmpfs else salt['omv_conf.get_sharedfolder_path'](config.sharedfolderref) %}
 
 {% set shutdown_action = None %}
@@ -71,6 +72,8 @@ configure_writecache_config:
         workspace_type: {{ workspace_type }}
         workspace_root: "{{ workspace_root }}"
         tmpfs_size: "{{ tmpfs_size }}"
+        zram_size: "{{ config.zram_size }}"
+        zram_algo: "{{ config.zram_algo }}"
         journald_storage: "{{ config.journald_storage }}"
         flush_on_boot: {{ config.flush_on_boot | to_bool }}
         flush_on_shutdown: {{ config.flush_on_shutdown | to_bool }}

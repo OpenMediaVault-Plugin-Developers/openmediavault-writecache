@@ -32,6 +32,27 @@
       "type": "string",
       "default": "25%"
     },
+    "ram_backing": {
+      "type": "string",
+      "enum": [
+        "tmpfs",
+        "zram"
+      ],
+      "default": "tmpfs"
+    },
+    "zram_size": {
+      "type": "string",
+      "default": "512M"
+    },
+    "zram_algo": {
+      "type": "string",
+      "enum": [
+        "zstd",
+        "lz4",
+        "lzo"
+      ],
+      "default": "zstd"
+    },
     "journald_storage": {
       "type": "string",
       "enum": [

@@ -27,8 +27,30 @@ class OMVRpcServiceWriteCache extends \OMV\Rpc\ServiceAbstract
     {
         $this->registerMethod("getSettings");
         $this->registerMethod("setSettings");
+        $this->registerMethod("getCompressionAlgorithms");
         $this->registerMethod("doFlush");
         $this->registerMethod("doTest");
+    }
+
+    public function getCompressionAlgorithms($params, $context)
+    {
+        // Validate the RPC caller context.
+        $this->validateMethodContext($context, ["role" => OMV_ROLE_ADMINISTRATOR]);
+        // Ask the engine which zram compression backends this kernel supports.
+        $output = [];
+        $cmd = new \OMV\System\Process('omv-writecache', 'algos');
+        $cmd->setQuiet(true);
+        $cmd->execute($output, $exitStatus);
+        $algos = array_values(array_filter(array_map('trim', $output)));
+        if (empty($algos)) {
+            // Fallback to a common set if enumeration failed.
+            $algos = ['zstd', 'lz4', 'lz4hc', 'lzo-rle', '842'];
+        }
+        $result = [];
+        foreach ($algos as $algo) {
+            $result[] = ['value' => $algo, 'text' => $algo];
+        }
+        return $result;
     }
 
     public function getSettings($params, $context)
@@ -77,11 +99,14 @@ class OMVRpcServiceWriteCache extends \OMV\Rpc\ServiceAbstract
             }
         }
         $object = $db->get("conf.service.writecache");
-        // check to see if use_tmpfs changed.
-        // run unmount if changed
+        // Tear down the current workspace if the backing medium changed, so the
+        // old workspace (tmpfs/zram/path) is cleanly unmounted with its existing
+        // config before salt redeploys and remounts with the new backing.
         $curTmpfs = $object->get('use_tmpfs');
         $newTmpfs = $params['use_tmpfs'];
-        if ($curTmpfs != $newTmpfs) {
+        $curBacking = $object->get('ram_backing');
+        $newBacking = $params['ram_backing'];
+        if (($curTmpfs != $newTmpfs) || ($curBacking != $newBacking)) {
             $cmd = new \OMV\System\Process('omv-writecache', 'unmount');
             $cmd->setRedirect2to1();
             $cmd->execute($output, $exitStatus);

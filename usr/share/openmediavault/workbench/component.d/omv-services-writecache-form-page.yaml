@@ -20,6 +20,21 @@ data:
         label: _("Use system memory")
         value: true
         hint: _("If checked, writecache will use system memory to store changes.<br/>If unchecked, writecache will store those changes in the selected shared folder. Changes are not lost if the system reboots or shuts down unexpectedly.")
+      - type: select
+        name: ram_backing
+        label: _("Memory backing")
+        value: "tmpfs"
+        hint: '_("RAM (tmpfs): fastest, uses uncompressed system memory.<br/>Compressed RAM (zram): a log2ram-style compressed RAM disk that holds more data per MB of memory, at a small CPU cost.<br/><b>Both are volatile</b> &mdash; changes since the last flush are lost on unexpected power loss. Uncheck system memory and select a shared folder for power-loss durability.")'
+        store:
+          data:
+            - ["tmpfs", _("RAM (tmpfs)")]
+            - ["zram", _("Compressed RAM (zram)")]
+        modifiers:
+          - type: visible
+            constraint:
+              operator: truthy
+              arg0:
+                prop: use_tmpfs
       - type: sharedFolderSelect
         name: sharedfolderref
         label: _("Workspace folder")
@@ -59,9 +74,59 @@ data:
         modifiers:
           - type: visible
             constraint:
-              operator: truthy
+              operator: and
               arg0:
-                prop: use_tmpfs
+                operator: truthy
+                arg0:
+                  prop: use_tmpfs
+              arg1:
+                operator: eq
+                arg0:
+                  prop: ram_backing
+                arg1: tmpfs
+      - type: textInput
+        name: zram_size
+        label: _("zram size")
+        value: "512M"
+        hint: _("Logical (uncompressed) capacity of the zram device. Accepts M/G suffix; e.g. 256M, 512M, 1G. Actual RAM used is the compressed size, typically a fraction of this.")
+        modifiers:
+          - type: visible
+            constraint:
+              operator: and
+              arg0:
+                operator: truthy
+                arg0:
+                  prop: use_tmpfs
+              arg1:
+                operator: eq
+                arg0:
+                  prop: ram_backing
+                arg1: zram
+      - type: select
+        name: zram_algo
+        label: _("zram compression")
+        value: "zstd"
+        hint: _("Algorithms are enumerated from the running kernel; the set varies by kernel build.")
+        valueField: value
+        textField: text
+        store:
+          proxy:
+            service: WriteCache
+            get:
+              method: getCompressionAlgorithms
+        modifiers:
+          - type: visible
+            constraint:
+              operator: and
+              arg0:
+                operator: truthy
+                arg0:
+                  prop: use_tmpfs
+              arg1:
+                operator: eq
+                arg0:
+                  prop: ram_backing
+                arg1: zram
       - type: select
         name: journald_storage
         label: _("Journal storage")

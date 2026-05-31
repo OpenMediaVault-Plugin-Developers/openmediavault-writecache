@@ -152,7 +152,7 @@ def handle_signal(signum, frame):
 
 def get_workspace_type(cfg: dict) -> str:
     t = str(cfg.get("workspace_type", "tmpfs")).strip().lower()
-    return t if t in ("tmpfs", "path") else "tmpfs"
+    return t if t in ("tmpfs", "path", "zram") else "tmpfs"
 
 def get_workspace_root(cfg: dict) -> Path:
     p = str(cfg.get("workspace_root", str(DEFAULT_WORKSPACE_ROOT))).strip() or str(DEFAULT_WORKSPACE_ROOT)
@@ -273,6 +273,174 @@ def is_tmpfs_mounted_at(path: Path) -> bool:
             return True
     return False
 
+def is_zram_mounted_at(path: Path) -> bool:
+    # ensure a zram-backed filesystem is mounted at path
+    for m in get_mounts():
+        if m["path"] == str(path) and m["device"].startswith("/dev/zram"):
+            return True
+    return False
+
+def device_for_mount(path: Path) -> str:
+    for m in get_mounts():
+        if m["path"] == str(path):
+            return m["device"]
+    return ""
+
+ZRAM_CONTROL = "/sys/class/zram-control"
+
+def _zram_backend_modules(algo: str) -> list:
+    """Candidate kernel module names that provide a zram compression backend.
+
+    Some backends (notably zstd) are modular and not loaded this early in boot,
+    which makes a comp_algorithm write silently fall back to the built-in
+    default (lzo-rle). lzo/lzo-rle are built-in and need no module.
+    """
+    return {
+        "zstd":    ["zstd"],
+        "lz4":     ["lz4", "lz4_compress"],
+        "lz4hc":   ["lz4hc", "lz4hc_compress"],
+        "lzo":     [],
+        "lzo-rle": [],
+        "842":     ["842", "842_compress"],
+    }.get(algo, [])
+
+def alloc_zram_device(size: str, algo: str) -> str:
+    """Create and configure a fresh, dedicated zram device.
+
+    Allocate via the zram-control 'hot_add' interface so we always get a
+    brand-new device, rather than 'zramctl -f' which can collide with a zram
+    device already claimed for swap (zram-tools / systemd-zram-generator). That
+    collision is common on Proxmox kernels and races at early boot, where the
+    swap device may be mid-setup and reported busy.
+
+    Returns the device node path (e.g. /dev/zram1) or '' on failure.
+    """
+    run(["modprobe", "zram"], check=False)
+
+    idx = None
+    hot_add = os.path.join(ZRAM_CONTROL, "hot_add")
+    if os.path.exists(hot_add):
+        try:
+            with open(hot_add) as f:
+                idx = int(f.read().strip())
+        except Exception as e:
+            log(f"ZRAM_HOT_ADD_FAILED: {e}", "WARN")
+            idx = None
+
+    if idx is None:
+        # Fallback for kernels without zram-control: let zramctl find/create one.
+        r = run(["zramctl", "-f", "-a", algo, "-s", size], check=False)
+        for tok in (r.stdout or "").split():
+            if tok.startswith("/dev/zram"):
+                return tok
+        return ""
+
+    dev = f"/dev/zram{idx}"
+    # Best-effort: load the compression backend so the requested algorithm is
+    # available this early in boot. Without this, zstd (modular) silently falls
+    # back to the built-in lzo-rle default.
+    for mod in _zram_backend_modules(algo):
+        run(["modprobe", mod], check=False)
+    # comp_algorithm must be set before disksize: once the device is sized it
+    # is initialised and the algorithm becomes read-only.
+    try:
+        with open(f"/sys/block/zram{idx}/comp_algorithm", "w") as f:
+            f.write(algo)
+    except Exception as e:
+        log(f"ZRAM_ALGO_WARN: {dev} algo={algo} - {e} (using kernel default)", "WARN")
+    # Read back the active algorithm (marked in [brackets]) for transparency.
+    try:
+        avail = Path(f"/sys/block/zram{idx}/comp_algorithm").read_text()
+        active = next((tok.strip("[]") for tok in avail.split() if tok.startswith("[")), algo)
+        if active != algo:
+            log(f"ZRAM_ALGO_FALLBACK: requested={algo} active={active}", "WARN")
+        else:
+            log(f"ZRAM_ALGO_OK: {active}", "DEBUG")
+    except Exception:
+        pass
+    try:
+        with open(f"/sys/block/zram{idx}/disksize", "w") as f:
+            f.write(size)
+    except Exception as e:
+        log(f"ZRAM_DISKSIZE_FAILED: {dev} size={size} - {e}", "ERROR")
+        free_zram_device(dev)
+        return ""
+    # Let udev finish probing the new device before we mkfs/mount it, so an
+    # early-boot udev open doesn't make those operations race (EBUSY).
+    run(["udevadm", "settle", "--timeout=10"], check=False)
+    log(f"ZRAM_ALLOC: {dev} size={size} algo={algo}")
+    return dev
+
+def free_zram_device(dev: str) -> None:
+    """Reset and hot-remove a zram device so devices don't accumulate."""
+    if not dev.startswith("/dev/zram"):
+        return
+    try:
+        idx = int(dev.replace("/dev/zram", ""))
+    except ValueError:
+        return
+    # Reset frees the compressed pages held in RAM.
+    run(["zramctl", "-r", dev], check=False)
+    # Hot-remove returns the device to the kernel.
+    hot_remove = os.path.join(ZRAM_CONTROL, "hot_remove")
+    if os.path.exists(hot_remove):
+        try:
+            with open(hot_remove, "w") as f:
+                f.write(str(idx))
+            log(f"ZRAM_HOT_REMOVE: {dev}")
+        except Exception as e:
+            log(f"ZRAM_HOT_REMOVE_FAILED: {dev} - {e}", "WARN")
+
+def list_zram_algorithms() -> list:
+    """Return the zram compression algorithms supported by the running kernel.
+
+    Modular backends (notably zstd) are loaded first so they appear in the
+    advertised list even right after boot. The list is read from a zram
+    device's comp_algorithm attribute, creating and removing a throwaway
+    device if none currently exists.
+    """
+    run(["modprobe", "zram"], check=False)
+    for a in ("zstd", "lz4", "lz4hc", "842"):
+        for mod in _zram_backend_modules(a):
+            run(["modprobe", mod], check=False)
+
+    idx = None
+    temp = False
+    try:
+        existing = sorted(Path("/sys/block").glob("zram*"),
+                          key=lambda p: int(p.name.replace("zram", "")))
+        if existing:
+            idx = int(existing[0].name.replace("zram", ""))
+    except Exception:
+        idx = None
+
+    if idx is None:
+        hot_add = os.path.join(ZRAM_CONTROL, "hot_add")
+        if os.path.exists(hot_add):
+            try:
+                with open(hot_add) as f:
+                    idx = int(f.read().strip())
+                temp = True
+            except Exception:
+                idx = None
+
+    algos = []
+    if idx is not None:
+        try:
+            raw = Path(f"/sys/block/zram{idx}/comp_algorithm").read_text()
+            algos = [tok.strip("[]") for tok in raw.split() if tok.strip()]
+        except Exception:
+            algos = []
+        if temp:
+            free_zram_device(f"/dev/zram{idx}")
+
+    # Dedupe, preserve kernel order.
+    seen = set(); out = []
+    for a in algos:
+        if a and a not in seen:
+            out.append(a); seen.add(a)
+    return out
+
 def drop_pending_changes(cfg: dict):
     """
     For policy=drop targets, discard any pending upper/work content in a persistent workspace.
@@ -324,6 +492,42 @@ def ensure_workspace(cfg: dict) -> Path:
         run(["mount", "-t", "tmpfs", "-o", f"size={size},mode=0755", "tmpfs", str(ws_root)])
         return ws_root
 
+    if ws_type == "zram":
+        ws_root.mkdir(parents=True, exist_ok=True)
+        if is_zram_mounted_at(ws_root):
+            log(f"WORKSPACE_EXISTS: {ws_root} (zram)")
+            return ws_root
+        size = cfg.get("zram_size", "512M")
+        algo = cfg.get("zram_algo", "zstd")
+        log(f"WORKSPACE_MOUNT: zram {ws_root} size={size} algo={algo}")
+        run(["modprobe", "zram"], check=False)
+
+        def _alloc_zram(args):
+            # zramctl prints the chosen device on stdout; stderr is merged in by run().
+            r = run(["zramctl", "-f"] + args + ["-s", size], check=False)
+            for tok in (r.stdout or "").split():
+                if tok.startswith("/dev/zram"):
+                    return r.returncode, tok
+            return r.returncode, ""
+
+        rc, dev = _alloc_zram(["-a", algo])
+        if rc != 0 or not dev:
+            # Retry without an explicit algorithm in case the kernel lacks it.
+            log(f"ZRAM_ALLOC_RETRY: algo={algo} failed, retrying with kernel default", "WARN")
+            rc, dev = _alloc_zram([])
+        if rc != 0 or not dev:
+            log("ZRAM_ALLOC_FAILED: could not allocate a zram device", "ERROR")
+            raise SystemExit(1)
+
+        run(["mkfs.ext4", "-F", "-q", "-m", "0", "-O", "^has_journal", dev], check=False)
+        run(["mount", "-o", "noatime,nosuid,nodev,discard", dev, str(ws_root)])
+        try:
+            os.chmod(str(ws_root), 0o755)
+        except Exception as e:
+            log(f"ZRAM_CHMOD_WARN: {ws_root} - {e}", "WARN")
+        log(f"ZRAM_READY: dev={dev} mounted at {ws_root}")
+        return ws_root
+
     # ws_type == "path"
     ws_root.mkdir(parents=True, exist_ok=True)
     try:
@@ -340,6 +544,8 @@ def is_workspace_ready(cfg: dict) -> bool:
     ws_type = get_workspace_type(cfg)
     if ws_type == "tmpfs":
         return is_tmpfs_mounted_at(ws_root)
+    if ws_type == "zram":
+        return is_zram_mounted_at(ws_root)
     # path
     return ws_root.exists() and os.access(str(ws_root), os.W_OK)
 
@@ -519,6 +725,8 @@ def load_config():
         "workspace_type": "tmpfs",  # tmpfs | path
         "workspace_root": str(DEFAULT_WORKSPACE_ROOT),
         "tmpfs_size": "25%",
+        "zram_size": "512M",
+        "zram_algo": "zstd",
         "flush_on_boot": False,
         "journald_storage": "volatile",
         "flush_on_shutdown": True,
@@ -1294,13 +1502,18 @@ def unmount(cfg):
     if ws_type == "path":
         drop_pending_changes(cfg)
 
-    # 5) if workspace is a tmpfs that we mounted, unmount it
-    if ws_type == "tmpfs":
+    # 5) if workspace is RAM-backed (tmpfs/zram) that we mounted, tear it down
+    if ws_type in ("tmpfs", "zram"):
+        # Capture the backing device before unmounting so we can reset the zram.
+        zdev = device_for_mount(ws_root) if ws_type == "zram" else ""
         if is_mountpoint(ws_root):
             log(f"WORKSPACE_UNMOUNT_ROOT: {ws_root}")
             force_unmount_with_retry(ws_root)
         else:
             log(f"WORKSPACE_ROOT_NOT_MOUNTED: {ws_root}", "DEBUG")
+        if ws_type == "zram" and zdev.startswith("/dev/zram"):
+            log(f"ZRAM_RESET: {zdev}")
+            run(["zramctl", "-r", zdev], check=False)
 
     log("UNMOUNT_COMPLETE: Finished")
 
@@ -1354,6 +1567,8 @@ def cmd_status():
     if not is_workspace_ready(cfg):
         if ws_type == "tmpfs":
             print(f"WriteCache: INACTIVE - {ws_root} is not mounted (tmpfs workspace missing).")
+        elif ws_type == "zram":
+            print(f"WriteCache: INACTIVE - {ws_root} is not mounted (zram workspace missing).")
         else:
             print(f"WriteCache: INACTIVE - workspace path not available/writable: {ws_root}")
         print("Overlays cannot be active without the workspace.")
@@ -1370,6 +1585,8 @@ def cmd_status():
 
     if ws_type == "tmpfs":
         print(f"WriteCache: ACTIVE - {ws_root} is mounted (tmpfs).")
+    elif ws_type == "zram":
+        print(f"WriteCache: ACTIVE - {ws_root} is mounted (zram).")
     else:
         print(f"WriteCache: ACTIVE - workspace path is available: {ws_root}")
     print(f"Overlays mounted: {active}/{len(items)}")
@@ -1379,6 +1596,7 @@ def cmd_status():
     ws_prefix = f"upperdir={str(ws_root).rstrip('/')}/"
     writecache_mounts = [m for m in mounts if (
         (ws_type == "tmpfs" and m["fstype"] == "tmpfs" and m["path"] == str(ws_root)) or
+        (ws_type == "zram" and m["device"].startswith("/dev/zram") and m["path"] == str(ws_root)) or
         (m["fstype"] == "overlay" and ws_prefix in m["opts"])
     )]
 
@@ -1435,6 +1653,10 @@ def cmd_df():
             print(f"{str(ws_root):<42} {'NO':<7}  {'-':<5}  {'-':>10}  NOT AVAILABLE")
 
 
+def cmd_algos():
+    for a in list_zram_algorithms():
+        print(a)
+
 def main():
     if len(sys.argv) < 2:
         print(
@@ -1448,6 +1670,7 @@ def main():
             "  remount\n"
             "  status\n"
             "  df\n"
+            "  algos\n"
             "  version"
         )
         sys.exit(2)
@@ -1473,10 +1696,13 @@ def main():
         args.remove("--daily")
 
     # Identify commands that should not lock and should not log
-    no_lock_no_log_cmds = {"df", "status", "version", "-v", "--version"}
+    no_lock_no_log_cmds = {"df", "status", "version", "-v", "--version", "algos"}
     mutating_cmds = {"mount", "rotateflush", "flush", "unmount", "rotateunmount", "remount"}
+    # algos enumerates kernel zram backends (modprobe/hot_add) and needs root,
+    # but takes no lock and emits no dated log output so callers get clean lines.
+    root_cmds = mutating_cmds | {"algos"}
 
-    # Disable logging entirely for df/status/version so there is no dated output
+    # Disable logging entirely for df/status/version/algos so there is no dated output
     if cmd in no_lock_no_log_cmds:
         LOG_ENABLED = False
 
@@ -1485,8 +1711,8 @@ def main():
         print(SCRIPT_VERSION)
         sys.exit(0)
 
-    # Non-mutating commands can run without root
-    if cmd in mutating_cmds and os.geteuid() != 0:
+    # Commands that touch mounts or kernel modules require root
+    if cmd in root_cmds and os.geteuid() != 0:
         print("This tool must be run as root", file=sys.stderr)
         sys.exit(1)
 
@@ -1520,6 +1746,8 @@ def main():
         cmd_status()
     elif cmd == "df":
         cmd_df()
+    elif cmd == "algos":
+        cmd_algos()
     else:
         if cmd in mutating_cmds:
             log(f"UNKNOWN_CMD: {cmd}", "ERROR")
