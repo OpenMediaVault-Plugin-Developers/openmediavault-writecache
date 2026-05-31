@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: openmediavault-writecache\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-31 01:31+0000\n"
+"POT-Creation-Date: 2026-05-31 15:36+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -18,6 +18,12 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 
 msgid "A workspace shared folder must be selected when not using system memory."
+msgstr ""
+
+msgid "Algorithms are enumerated from the running kernel; the set varies by kernel build."
+msgstr ""
+
+msgid "Compressed RAM (zram)"
 msgstr ""
 
 msgid "Date & Time"
@@ -59,10 +65,19 @@ msgstr ""
 msgid "Level"
 msgstr ""
 
+msgid "Logical (uncompressed) capacity of the zram device. Accepts M/G suffix; e.g. 256M, 512M, 1G. Actual RAM used is the compressed size, typically a fraction of this."
+msgstr ""
+
+msgid "Memory backing"
+msgstr ""
+
 msgid "Minute"
 msgstr ""
 
 msgid "Overlay paths and policy"
+msgstr ""
+
+msgid "RAM (tmpfs)"
 msgstr ""
 
 msgid "Rotate & Flush"
@@ -120,4 +135,10 @@ msgid "tmpfs size"
 msgstr ""
 
 msgid "volatile (RAM)"
+msgstr ""
+
+msgid "zram compression"
+msgstr ""
+
+msgid "zram size"
 msgstr ""

@@ -11,7 +11,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: openmediavault-writecache\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-31 01:31+0000\n"
+"POT-Creation-Date: 2026-05-31 15:36+0000\n"
 "PO-Revision-Date: 2025-08-17 20:57+0000\n"
 "Last-Translator: Stephan Paternotte <stephan@paternottes.net>, 2026\n"
 "Language-Team: Dutch (https://app.transifex.com/openmediavault-plugin-developers/teams/1854/nl/)\n"
@@ -26,6 +26,14 @@ msgid ""
 msgstr ""
 "Als het systeemgeheugen niet wordt gebruik, moet er een gedeelde "
 "werkruimtemap worden geselecteerd."
+
+msgid ""
+"Algorithms are enumerated from the running kernel; the set varies by kernel "
+"build."
+msgstr ""
+
+msgid "Compressed RAM (zram)"
+msgstr ""
 
 msgid "Date & Time"
 msgstr "Datum & Tijd"
@@ -74,11 +82,23 @@ msgstr "Journaal-opslag"
 msgid "Level"
 msgstr "Niveau"
 
+msgid ""
+"Logical (uncompressed) capacity of the zram device. Accepts M/G suffix; e.g."
+" 256M, 512M, 1G. Actual RAM used is the compressed size, typically a "
+"fraction of this."
+msgstr ""
+
+msgid "Memory backing"
+msgstr ""
+
 msgid "Minute"
 msgstr "Minuut"
 
 msgid "Overlay paths and policy"
 msgstr "Overlaypaden en beleid"
+
+msgid "RAM (tmpfs)"
+msgstr ""
 
 msgid "Rotate & Flush"
 msgstr "Roteren & Doorspoelen"
@@ -140,3 +160,9 @@ msgstr "Grootte van tmpfs"
 
 msgid "volatile (RAM)"
 msgstr "Kortstondig (RAM)"
+
+msgid "zram compression"
+msgstr ""
+
+msgid "zram size"
+msgstr ""

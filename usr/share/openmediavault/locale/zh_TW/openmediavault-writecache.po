@@ -11,7 +11,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: openmediavault-writecache\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-31 01:31+0000\n"
+"POT-Creation-Date: 2026-05-31 15:36+0000\n"
 "PO-Revision-Date: 2025-08-17 20:57+0000\n"
 "Last-Translator: kochin <kochinc@outlook.com>, 2026\n"
 "Language-Team: Chinese (Taiwan) (https://app.transifex.com/openmediavault-plugin-developers/teams/1854/zh_TW/)\n"
@@ -24,6 +24,14 @@ msgstr ""
 msgid ""
 "A workspace shared folder must be selected when not using system memory."
 msgstr "當不使用系統記憶體時，必須選定一個工作空間共享檔案夾。"
+
+msgid ""
+"Algorithms are enumerated from the running kernel; the set varies by kernel "
+"build."
+msgstr ""
+
+msgid "Compressed RAM (zram)"
+msgstr ""
 
 msgid "Date & Time"
 msgstr "日期與時間"
@@ -70,11 +78,23 @@ msgstr "日誌儲存空間"
 msgid "Level"
 msgstr "層級"
 
+msgid ""
+"Logical (uncompressed) capacity of the zram device. Accepts M/G suffix; e.g."
+" 256M, 512M, 1G. Actual RAM used is the compressed size, typically a "
+"fraction of this."
+msgstr ""
+
+msgid "Memory backing"
+msgstr ""
+
 msgid "Minute"
 msgstr "分鐘"
 
 msgid "Overlay paths and policy"
 msgstr "覆蓋路徑及策略"
+
+msgid "RAM (tmpfs)"
+msgstr ""
 
 msgid "Rotate & Flush"
 msgstr "輪換與清出"
@@ -134,3 +154,9 @@ msgstr "tmpfs 大小"
 
 msgid "volatile (RAM)"
 msgstr "易失性 (RAM)"
+
+msgid "zram compression"
+msgstr ""
+
+msgid "zram size"
+msgstr ""
