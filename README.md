@@ -9,7 +9,7 @@ OverlayFS-based write reduction plugin for openmediavault 7
 - Journald `Storage=volatile` option to keep logs in RAM.
 - Salt-managed config at `/etc/omv-writecache/config.yaml`.
 - Systemd oneshot units for mount/flush.
-- Minimal web UI (Workbench YAML) under **Services → Write Cache**.
+- Minimal web UI (Workbench YAML) under **Services → WriteCache**.
 
 ### Manual CLI
 ```bash

@@ -2,6 +2,6 @@ version: "1.0"
 type: navigation-item
 data:
   path: "services.writecache"
-  text: _("Write Cache")
+  text: _("WriteCache")
   icon: "mdi:usb-flash-drive-outline"
   url: "/services/writecache"

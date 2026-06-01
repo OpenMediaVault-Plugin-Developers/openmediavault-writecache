@@ -2,7 +2,7 @@ version: "1.0"
 type: log
 data:
   id: writecache
-  text: _("Write Cache")
+  text: _("WriteCache")
   columns:
     - name: _("Date & Time")
       prop: date
