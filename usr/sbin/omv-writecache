@@ -500,22 +500,14 @@ def ensure_workspace(cfg: dict) -> Path:
         size = cfg.get("zram_size", "512M")
         algo = cfg.get("zram_algo", "zstd")
         log(f"WORKSPACE_MOUNT: zram {ws_root} size={size} algo={algo}")
-        run(["modprobe", "zram"], check=False)
 
-        def _alloc_zram(args):
-            # zramctl prints the chosen device on stdout; stderr is merged in by run().
-            r = run(["zramctl", "-f"] + args + ["-s", size], check=False)
-            for tok in (r.stdout or "").split():
-                if tok.startswith("/dev/zram"):
-                    return r.returncode, tok
-            return r.returncode, ""
-
-        rc, dev = _alloc_zram(["-a", algo])
-        if rc != 0 or not dev:
-            # Retry without an explicit algorithm in case the kernel lacks it.
-            log(f"ZRAM_ALLOC_RETRY: algo={algo} failed, retrying with kernel default", "WARN")
-            rc, dev = _alloc_zram([])
-        if rc != 0 or not dev:
+        # Allocate a fresh, dedicated device via zram-control 'hot_add'. This
+        # never reuses zram0, so it can't collide with a zram device already
+        # claimed for swap (zram-tools / rpi-swap / systemd-zram-generator),
+        # and it loads the requested compression backend first so a modular
+        # algo (e.g. zstd) doesn't silently fall back to the kernel default.
+        dev = alloc_zram_device(size, algo)
+        if not dev:
             log("ZRAM_ALLOC_FAILED: could not allocate a zram device", "ERROR")
             raise SystemExit(1)
 
@@ -548,26 +540,6 @@ def is_workspace_ready(cfg: dict) -> bool:
         return is_zram_mounted_at(ws_root)
     # path
     return ws_root.exists() and os.access(str(ws_root), os.W_OK)
-
-def dir_size_bytes(path: Path) -> int:
-    """Best-effort size of directory contents (regular files + symlinks), in bytes."""
-    total = 0
-    try:
-        if not path.exists():
-            return 0
-        for root, dirs, files in os.walk(path, topdown=True, followlinks=False):
-            for name in files:
-                p = Path(root) / name
-                try:
-                    st = os.lstat(p)
-                    total += st.st_size
-                except FileNotFoundError:
-                    continue
-                except Exception:
-                    continue
-    except Exception:
-        return 0
-    return total
 
 def wait_for_unmount(path: Path, timeout: int = 10) -> bool:
     """Wait for a path to be unmounted, with timeout"""
@@ -1512,8 +1484,10 @@ def unmount(cfg):
         else:
             log(f"WORKSPACE_ROOT_NOT_MOUNTED: {ws_root}", "DEBUG")
         if ws_type == "zram" and zdev.startswith("/dev/zram"):
-            log(f"ZRAM_RESET: {zdev}")
-            run(["zramctl", "-r", zdev], check=False)
+            # Reset frees the compressed pages and hot_remove returns the device
+            # to the kernel, so devices allocated via hot_add don't accumulate
+            # across mount/unmount cycles.
+            free_zram_device(zdev)
 
     log("UNMOUNT_COMPLETE: Finished")
 
