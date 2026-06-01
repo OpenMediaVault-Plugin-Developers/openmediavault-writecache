@@ -1,3 +1,10 @@
+openmediavault-writecache (8.2.1) stable; urgency=low
+
+  * Wire the zram workspace through alloc_zram_device/free_zram_device so it allocates via hot_add (never reusing zram0) and loads the compression backend, avoiding collisions with an existing zram-swap device and silent algo fallback
+  * Hot-remove the zram device on teardown so devices don't accumulate across mount/unmount cycles
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Mon, 01 Jun 2026 21:19:08 +0000
+
 openmediavault-writecache (8.2) stable; urgency=low
 
   * Add zram (compressed RAM) workspace backing as a log2ram-style alternative to tmpfs
