@@ -919,6 +919,31 @@ def is_overlay_mounted(path: Path) -> bool:
     mounts = get_mounts()
     return any(m["path"] == str(path) and m["fstype"] == "overlay" for m in mounts)
 
+def live_overlay_dirs(path: Path):
+    """Return {'lower','upper','work'} for the overlay currently mounted at 'path'.
+
+    The values are parsed from the live mount options, so they reflect where the
+    overlay was ACTUALLY mounted regardless of any later workspace_root config
+    change. Returns None when no single-lower overlay is mounted at 'path'.
+    """
+    target = str(path)
+    for m in get_mounts():
+        if m["path"] != target or m["fstype"] != "overlay":
+            continue
+        d = {}
+        for kv in m["opts"].split(","):
+            if kv.startswith("lowerdir="):
+                d["lower"] = kv[len("lowerdir="):]
+            elif kv.startswith("upperdir="):
+                d["upper"] = kv[len("upperdir="):]
+            elif kv.startswith("workdir="):
+                d["work"] = kv[len("workdir="):]
+        # Only handle the single-lower layout this tool creates; a colon-separated
+        # lowerdir is not something we manage, so fall back to config-derived paths.
+        if all(k in d for k in ("lower", "upper", "work")) and ":" not in d["lower"]:
+            return d
+    return None
+
 def is_overlayfs_whiteout(p: Path) -> bool:
     """
     overlayfs can represent whiteouts as character devices with rdev 0,0.
@@ -1326,19 +1351,31 @@ def flush(cfg):
 
         p = Path(path).resolve()
         name = sanitize_name(str(p))
-        upper = ws_root / name / "upper"
-        work = ws_root / name / "work"
+
+        # Prefer the directories of the overlay CURRENTLY mounted at 'p'. The
+        # configured workspace_root can drift after overlays are mounted (e.g. the
+        # workspace type/root is changed in the UI while overlays are live). Flushing
+        # the live overlay's own upper/lower/work avoids operating on the wrong
+        # (usually empty) workspace and silently discarding cached data.
+        live = live_overlay_dirs(p)
+        if live:
+            lower = Path(live["lower"])
+            upper = Path(live["upper"])
+            work = Path(live["work"])
+            if upper.parent != (ws_root / name):
+                log(f"WORKSPACE_DRIFT: {p} live workspace={upper.parent} configured={ws_root / name}; using live", "WARN")
+        else:
+            upper = ws_root / name / "upper"
+            work = ws_root / name / "work"
+            lower = lower_bind_for(ws_root, name)
+
         if not upper.exists():
             log(f"NO_UPPER: {p}", "DEBUG")
             continue
 
-        lower = lower_bind_for(ws_root, name)
-        if not is_mountpoint(lower):
-            lower = ensure_lower_bind(ws_root, p, name)
-
-        # Unmount overlay so lower changes are seen on remount
-
-        # 1) Unmount overlay FIRST so that 'p' resolves to the real filesystem.
+        # 1) Unmount overlay FIRST so that 'p' resolves to the real filesystem and so
+        #    that (re)binding the lower below cannot accidentally capture our own
+        #    overlay (which would make the lower bind 'overlay'-sourced and unsafe).
         if is_overlay_mounted(p):
             log(f"PRE-FLUSH_UNMOUNT: {p}")
             if not force_unmount_with_retry(p):
@@ -1346,17 +1383,23 @@ def flush(cfg):
                 errors += 1
                 continue
 
-        # 2) Ensure the lower bind exists AFTER overlay is gone.
-        lower = lower_bind_for(ws_root, name)
-
-        # If lower exists but is "poisoned" (overlay), tear it down and rebind.
+        # 2) If the lower bind exists but is "poisoned" (overlay), tear it down so it
+        #    can be rebound from the now-real path.
         if is_mountpoint(lower) and not lower_bind_is_safe(lower):
             info = findmnt_info(lower)
             log(f"LOWER_BIND_BAD: {lower} source={info.get('source')} fstype={info.get('fstype')} - recreating", "ERROR")
             force_unmount_with_retry(lower)
 
+        # 3) Bind the lower from the (now overlay-free) real path if it is missing.
         if not is_mountpoint(lower):
-            lower = ensure_lower_bind(ws_root, p, name)
+            lower.mkdir(parents=True, exist_ok=True)
+            res = run(["mount", "--bind", str(p), str(lower)], check=False)
+            if res.returncode != 0 or not is_mountpoint(lower):
+                log(f"LOWER_BIND_FAILED: {p} -> {lower}", "ERROR")
+                errors += 1
+                continue
+            run(["mount", "--make-private", str(lower)], check=False)
+            remount_lower(lower, rw=False, check=False)
 
         # Final safety check: refuse to flush if lower is not a real mount.
         if not lower_bind_is_safe(lower):
