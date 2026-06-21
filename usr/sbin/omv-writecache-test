@@ -337,6 +337,39 @@ def check_overlay_mounted(path: str) -> bool:
         pass
     return False
 
+def overlay_lowerdir(path: str) -> Optional[str]:
+    """Return the first lowerdir of the overlay mounted at 'path', or None."""
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 4 and parts[1] == path and parts[2] == "overlay":
+                    for kv in parts[3].split(","):
+                        if kv.startswith("lowerdir="):
+                            return kv[len("lowerdir="):].split(":")[0]
+    except Exception:
+        pass
+    return None
+
+def findmnt_fstype(target: str) -> Optional[str]:
+    """Return the source filesystem type of the mount at 'target', or None."""
+    ok, out, _ = run_sh(["findmnt", "-no", "FSTYPE", target])
+    out = (out or "").strip()
+    return out if ok and out else None
+
+def load_writecache_module():
+    """Import the omv-writecache script as a module so its functions can be unit
+    tested directly. The script guards its CLI entry behind __name__ == '__main__',
+    so importing it has no side effects."""
+    import importlib.util
+    import importlib.machinery
+    sp = SCRIPT_PATH if Path(SCRIPT_PATH).exists() else "/usr/sbin/omv-writecache"
+    loader = importlib.machinery.SourceFileLoader("omv_writecache_mod", sp)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
 def get_workspace_usage(workspace_root: Path) -> Tuple[int, int]:
     """Return (used_bytes, total_bytes) for the filesystem containing workspace_root."""
     try:
@@ -1598,6 +1631,113 @@ class WriteCacheTest:
 
         return ok_all
 
+    def test_live_overlay_dirs_parsing(self) -> bool:
+        """Unit test: live_overlay_dirs() must read a live overlay's own
+        lower/upper/work from its mount options, return None when no overlay is
+        mounted at the path, and ignore (return None for) multi-lower overlays it
+        does not manage. This is what lets flush target the actually-mounted
+        workspace instead of re-deriving it from a possibly-drifted workspace_root."""
+        log_test("\n>>> Test: live_overlay_dirs parses live overlay mount options", "INFO")
+
+        try:
+            mod = load_writecache_module()
+        except Exception as e:
+            log_test(f"Could not import omv-writecache: {e}", "FAIL")
+            return False
+
+        if not hasattr(mod, "live_overlay_dirs"):
+            log_test("omv-writecache has no live_overlay_dirs()", "FAIL")
+            return False
+
+        base = "/srv/disk/writecache/var_log"
+        fake_single = [{
+            "device": "overlay", "path": "/var/log", "fstype": "overlay",
+            "opts": (f"rw,relatime,lowerdir={base}/lower,upperdir={base}/upper,"
+                     f"workdir={base}/work,uuid=on,nouserxattr"),
+        }]
+        fake_multi = [{
+            "device": "overlay", "path": "/var/log", "fstype": "overlay",
+            "opts": (f"rw,lowerdir={base}/lower:/other/lo,upperdir={base}/upper,"
+                     f"workdir={base}/work"),
+        }]
+
+        orig_get_mounts = mod.get_mounts
+        ok_all = True
+        try:
+            # 1) Single-lower overlay -> exact lower/upper/work.
+            mod.get_mounts = lambda: fake_single
+            got = mod.live_overlay_dirs(Path("/var/log"))
+            exp = {"lower": f"{base}/lower", "upper": f"{base}/upper", "work": f"{base}/work"}
+            single_ok = (got == exp)
+            log_test(f"  single-lower parse: {'OK' if single_ok else 'FAIL'} (got={got})",
+                     "SUCCESS" if single_ok else "FAIL")
+            ok_all &= single_ok
+
+            # 2) No overlay mounted at this path -> None.
+            none_ok = mod.live_overlay_dirs(Path("/var/tmp")) is None
+            log_test(f"  no-overlay -> None: {'OK' if none_ok else 'FAIL'}",
+                     "SUCCESS" if none_ok else "FAIL")
+            ok_all &= none_ok
+
+            # 3) Multi (colon-separated) lowerdir is not ours -> None (fall back).
+            mod.get_mounts = lambda: fake_multi
+            multi_ok = mod.live_overlay_dirs(Path("/var/log")) is None
+            log_test(f"  colon lowerdir -> None: {'OK' if multi_ok else 'FAIL'}",
+                     "SUCCESS" if multi_ok else "FAIL")
+            ok_all &= multi_ok
+        finally:
+            mod.get_mounts = orig_get_mounts
+
+        log_test("live_overlay_dirs parsing: " + ("OK" if ok_all else "FAIL"),
+                 "SUCCESS" if ok_all else "FAIL")
+        return ok_all
+
+    def test_flush_lower_bind_stays_safe(self) -> bool:
+        """Regression: a flush must never capture its own overlay as the lower bind.
+
+        The previous code bound the lower from the path while the overlay was still
+        mounted, producing an 'overlay'-sourced lower bind and the failure
+        'LOWER_BIND_UNSAFE: refusing to flush ... source=overlay'. After a flush every
+        managed overlay must be remounted and its lowerdir must resolve to a REAL
+        filesystem (not 'overlay')."""
+        log_test("\n>>> Test: flush keeps lower bind safe (no overlay-sourced lower)", "INFO")
+
+        flush_paths = [p for p, m in self.config_paths.items()
+                       if m in ("flush", "persist", "writeback")]
+        if not flush_paths:
+            log_test("Skip: no flush/persist/writeback paths configured", "WARN")
+            return True
+
+        ok, out = run_cmd("flush")
+        if not ok:
+            log_test("Flush command failed", "FAIL")
+            return False
+        if "LOWER_BIND_UNSAFE" in out:
+            log_test("Flush logged LOWER_BIND_UNSAFE", "FAIL")
+            return False
+
+        ok_all = True
+        for path_str in flush_paths:
+            if not check_overlay_mounted(path_str):
+                log_test(f"  {path_str}: overlay NOT remounted after flush", "FAIL")
+                ok_all = False
+                continue
+            lower = overlay_lowerdir(path_str)
+            if not lower:
+                log_test(f"  {path_str}: could not determine lowerdir", "FAIL")
+                ok_all = False
+                continue
+            fstype = findmnt_fstype(lower)
+            if fstype == "overlay":
+                log_test(f"  {path_str}: lower bind {lower} is overlay-sourced (UNSAFE)", "FAIL")
+                ok_all = False
+            else:
+                log_test(f"  {path_str}: lower {lower} fstype={fstype or '?'} OK", "SUCCESS")
+
+        log_test("flush lower-bind safety: " + ("OK" if ok_all else "FAIL"),
+                 "SUCCESS" if ok_all else "FAIL")
+        return ok_all
+
     # ========== MAIN TEST RUNNER ==========
 
     def run(self) -> Dict[str, bool]:
@@ -1627,6 +1767,8 @@ class WriteCacheTest:
             "workspace_survives_flush": False,
             "flush_preserves_dir_ownership": False,
             "flush_enforces_dir_ownership": False,
+            "live_overlay_dirs_parsing": False,
+            "flush_lower_bind_safe": False,
             "postfix_baseline": False,
             "postfix_after_mount": False,
             "postfix_after_flush": False,
@@ -1640,6 +1782,9 @@ class WriteCacheTest:
 
             # Drop-in file (static check, before any mounting)
             results["dropin_file"] = self.test_dropin_file()
+
+            # Unit test: live overlay dir parsing (no mounting required)
+            results["live_overlay_dirs_parsing"] = self.test_live_overlay_dirs_parsing()
 
             # Mount
             log_test("\n>>> Test 1: mount", "INFO")
@@ -1695,6 +1840,9 @@ class WriteCacheTest:
 
             # Verify flush applies user-specified owner=/mode= attrs when configured
             results["flush_enforces_dir_ownership"] = self.test_enforced_dir_ownership()
+
+            # Regression: flush must not capture its own overlay as the lower bind
+            results["flush_lower_bind_safe"] = self.test_flush_lower_bind_stays_safe()
 
             # Check Postfix after flush
             results["postfix_after_flush"], _ = check_postfix("flush")
