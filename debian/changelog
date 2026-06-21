@@ -1,3 +1,15 @@
+openmediavault-writecache (8.2.2) stable; urgency=low
+
+  * Flush the directories of the overlay actually mounted at each path
+    (read from the live mount) instead of re-deriving them from workspace_root,
+    so a workspace_root change while overlays are live no longer flushes
+    the wrong (empty) workspace
+  * Unmount the overlay before binding the lower so flush can no longer
+    capture its own overlay as the lower bind (fixes "LOWER_BIND_UNSAFE:
+    refusing to flush ... source=overlay")
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Sun, 21 Jun 2026 15:14:01 +0000
+
 openmediavault-writecache (8.2.1) stable; urgency=low
 
   * Wire the zram workspace through alloc_zram_device/free_zram_device so it allocates via hot_add (never reusing zram0) and loads the compression backend, avoiding collisions with an existing zram-swap device and silent algo fallback
