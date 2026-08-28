@@ -1,3 +1,23 @@
+openmediavault-writecache (8.2.3) stable; urgency=low
+
+  * Fix a failed flush destroying the cached writes it could not save. The upper
+    directory was deleted and recreated unconditionally, so an rsync failure
+    discarded every pending change and the remounted overlay exposed the older
+    lower content, making files appear to revert to an earlier version. The upper
+    is now preserved on failure and retried on the next flush
+  * Fix a failed flush being reported as a success. The failure branch never
+    incremented the error count, so flush() returned 0 and cron/systemd recorded
+    a clean run while data was being lost
+  * Abort the transfer for a path whose lower cannot be remounted read-write
+    instead of running rsync against a read-only target and failing every file
+  * Try a plain unmount before a lazy one when releasing an overlay. A lazy
+    unmount leaves the mount alive for processes holding open fds while removing
+    it from /proc/mounts, so their writes land in a detached upper that is then
+    cleared. Lazy remains the last resort for busy paths and now logs a warning
+    naming the affected path
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Fri, 28 Aug 2026 18:36:00 +0000
+
 openmediavault-writecache (8.2.2) stable; urgency=low
 
   * Flush the directories of the overlay actually mounted at each path
