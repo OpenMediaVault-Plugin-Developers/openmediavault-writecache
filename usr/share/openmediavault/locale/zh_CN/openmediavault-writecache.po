@@ -28,10 +28,10 @@ msgstr "当不使用系统内存时，必须选择一个工作区共享文件夹
 msgid ""
 "Algorithms are enumerated from the running kernel; the set varies by kernel "
 "build."
-msgstr ""
+msgstr "算法列表由正在运行的内核枚举得出；具体集合因内核构建版本而异。"
 
 msgid "Compressed RAM (zram)"
-msgstr ""
+msgstr "压缩内存 (zram)"
 
 msgid "Date & Time"
 msgstr "日期 & 时间"
@@ -82,9 +82,10 @@ msgid ""
 " 256M, 512M, 1G. Actual RAM used is the compressed size, typically a "
 "fraction of this."
 msgstr ""
+"zram 设备的逻辑（未压缩）容量。支持 M/G 后缀，例如 256M、512M、1G。实际占用的内存为压缩后的大小，通常仅为该容量的一小部分。"
 
 msgid "Memory backing"
-msgstr ""
+msgstr "内存支持"
 
 msgid "Minute"
 msgstr "分钟"
@@ -93,7 +94,7 @@ msgid "Overlay paths and policy"
 msgstr "覆盖路径及策略"
 
 msgid "RAM (tmpfs)"
-msgstr ""
+msgstr "RAM (tmpfs)"
 
 msgid "Rotate & Flush"
 msgstr "轮转与刷新"
@@ -155,7 +156,7 @@ msgid "volatile (RAM)"
 msgstr "易失性（内存）"
 
 msgid "zram compression"
-msgstr ""
+msgstr "zram 压缩"
 
 msgid "zram size"
-msgstr ""
+msgstr "zram 大小"

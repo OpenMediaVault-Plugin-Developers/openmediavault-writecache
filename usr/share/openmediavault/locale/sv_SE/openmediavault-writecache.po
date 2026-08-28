@@ -3,6 +3,9 @@
 # This file is distributed under the same license as the openmediavault-writecache package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
 # 
+# Translators:
+# Jonatan Nyberg, 2026
+# 
 #, fuzzy
 msgid ""
 msgstr ""
@@ -10,6 +13,7 @@ msgstr ""
 "Report-Msgid-Bugs-To: \n"
 "POT-Creation-Date: 2026-05-31 15:36+0000\n"
 "PO-Revision-Date: 2025-08-17 20:57+0000\n"
+"Last-Translator: Jonatan Nyberg, 2026\n"
 "Language-Team: Swedish (https://app.transifex.com/openmediavault-plugin-developers/teams/1854/sv/)\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
@@ -19,45 +23,47 @@ msgstr ""
 
 msgid ""
 "A workspace shared folder must be selected when not using system memory."
-msgstr ""
+msgstr "En delad arbetsmapp måste väljas när systemminnet inte används."
 
 msgid ""
 "Algorithms are enumerated from the running kernel; the set varies by kernel "
 "build."
 msgstr ""
+"Algoritmerna hämtas från den kärna som körs. Tillgängliga algoritmer "
+"varierar beroende på hur kärnan har byggts."
 
 msgid "Compressed RAM (zram)"
-msgstr ""
+msgstr "Komprimerat RAM-minne (zram)"
 
 msgid "Date & Time"
-msgstr ""
+msgstr "Datum och tid"
 
 msgid "Details"
-msgstr ""
+msgstr "Detaljer"
 
 msgid "Enabled"
-msgstr ""
+msgstr "Aktiverad"
 
 msgid "Event"
-msgstr ""
+msgstr "Händelse"
 
 msgid "Flush"
-msgstr ""
+msgstr "Skriv till disk"
 
 msgid "Flush daily"
-msgstr ""
+msgstr "Skriv till disk dagligen"
 
 msgid "Flush hourly"
-msgstr ""
+msgstr "Skriv till disk varje timme"
 
 msgid "Flush on boot"
-msgstr ""
+msgstr "Skriv till disk vid start"
 
 msgid "Flush on shutdown"
-msgstr ""
+msgstr "Skriv till disk vid avstängning"
 
 msgid "Hour"
-msgstr ""
+msgstr "Timme"
 
 msgid ""
 "If checked, writecache will use system memory to store changes.<br/>If "
@@ -65,92 +71,101 @@ msgid ""
 "folder. Changes are not lost if the system reboots or shuts down "
 "unexpectedly."
 msgstr ""
+"Om alternativet markeras använder writecache systemminnet för att lagra "
+"ändringar.<br/>Om det avmarkeras lagrar writecache ändringarna i den valda "
+"delade mappen. Ändringarna går då inte förlorade om systemet startas om "
+"eller stängs av oväntat."
 
 msgid "Journal storage"
-msgstr ""
+msgstr "Journallagring"
 
 msgid "Level"
-msgstr ""
+msgstr "Nivå"
 
 msgid ""
 "Logical (uncompressed) capacity of the zram device. Accepts M/G suffix; e.g."
 " 256M, 512M, 1G. Actual RAM used is the compressed size, typically a "
 "fraction of this."
 msgstr ""
+"Zram-enhetens logiska, okomprimerade kapacitet. Suffixen M och G kan "
+"användas, till exempel 256M, 512M eller 1G. Den faktiska RAM-användningen "
+"motsvarar den komprimerade storleken och är vanligtvis betydligt mindre."
 
 msgid "Memory backing"
-msgstr ""
+msgstr "Minneslagring"
 
 msgid "Minute"
-msgstr ""
+msgstr "Minut"
 
 msgid "Overlay paths and policy"
-msgstr ""
+msgstr "Överlagrade sökvägar och policy"
 
 msgid "RAM (tmpfs)"
-msgstr ""
+msgstr "RAM-minne (tmpfs)"
 
 msgid "Rotate & Flush"
-msgstr ""
+msgstr "Rotera och skriv till disk"
 
 msgid "Rotate on daily flush"
-msgstr ""
+msgstr "Rotera vid daglig skrivning till disk"
 
 msgid "Rotate on shutdown"
-msgstr ""
+msgstr "Rotera vid avstängning"
 
 msgid "Run journalctl rotate and sync before flush"
-msgstr ""
+msgstr "Kör journalctl rotate och sync före skrivning till disk"
 
 msgid "Running manual flush ..."
-msgstr ""
+msgstr "Skriver manuellt till disk…"
 
 msgid "Running manual rotate and flush ..."
-msgstr ""
+msgstr "Roterar och skriver manuellt till disk…"
 
 msgid "Services to reload/restart after flush"
-msgstr ""
+msgstr "Tjänster som ska läsas in eller startas om efter skrivning till disk"
 
 msgid ""
 "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, "
 "25%."
 msgstr ""
+"Storleken på tmpfs för /run/omv-writecache. Procenttecken och suffixen M och"
+" G kan användas, till exempel 512M, 2G eller 25%."
 
 msgid "Status"
-msgstr ""
+msgstr "Status"
 
 msgid "Use system memory"
-msgstr ""
+msgstr "Använd systemminnet"
 
 msgid "Used to store temporary writecache changes."
-msgstr ""
+msgstr "Används för att lagra tillfälliga writecache-ändringar."
 
 msgid "Workspace folder"
-msgstr ""
+msgstr "Arbetsmapp"
 
 msgid "Write Cache"
-msgstr ""
+msgstr "Skrivcache"
 
 msgid "Write Cache settings"
-msgstr ""
+msgstr "Inställningar för skrivcache"
 
 msgid "WriteCache"
-msgstr ""
+msgstr "WriteCache"
 
 msgid "auto"
-msgstr ""
+msgstr "automatiskt"
 
 msgid "persistent (disk)"
-msgstr ""
+msgstr "beständig (disk)"
 
 msgid "tmpfs size"
-msgstr ""
+msgstr "Tmpfs-storlek"
 
 msgid "volatile (RAM)"
-msgstr ""
+msgstr "flyktig (RAM)"
 
 msgid "zram compression"
-msgstr ""
+msgstr "Zram-komprimering"
 
 msgid "zram size"
-msgstr ""
+msgstr "Zram-storlek"
