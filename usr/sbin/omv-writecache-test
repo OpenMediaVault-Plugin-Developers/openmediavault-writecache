@@ -1738,6 +1738,238 @@ class WriteCacheTest:
                  "SUCCESS" if ok_all else "FAIL")
         return ok_all
 
+    # ---------- flush failure-path unit tests ----------
+
+    def _fake_flush_env(self, mod, tmp: Path, rsync_ok: bool, rw_ok: bool = True):
+        """Build a self-contained fake workspace and patch out everything flush()
+        touches except the logic under test. Returns (cfg, upper, calls, restore).
+
+        'calls' records whether rsync was actually attempted, so a test can prove
+        the read-only-lower guard short-circuits before the transfer.
+        """
+        ws = tmp / "ws"
+        name = "fake_target"
+        upper = ws / name / "upper"
+        work = ws / name / "work"
+        lower = ws / name / "lower"
+        for d in (upper, work, lower):
+            d.mkdir(parents=True, exist_ok=True)
+
+        # The sentinel is the "cached write" that must survive a failed flush.
+        (upper / "pending.log").write_text("cached-data")
+
+        cfg = {
+            "paths": "/fake/target = flush\n",
+            "workspace_root": str(ws),
+            "workspace_type": "path",
+        }
+
+        calls = {"rsync": 0}
+
+        class FakeResult:
+            returncode = 0
+            stdout = ""
+
+        orig = {k: getattr(mod, k) for k in (
+            "is_workspace_ready", "live_overlay_dirs", "is_overlay_mounted",
+            "is_mountpoint", "lower_bind_is_safe", "remount_lower",
+            "rsync_upper_to_lower", "run", "sync_upper_attrs",
+        )}
+
+        def fake_rsync(*a, **kw):
+            calls["rsync"] += 1
+            return rsync_ok
+
+        mod.is_workspace_ready = lambda cfg: True
+        mod.live_overlay_dirs = lambda p: None
+        mod.is_overlay_mounted = lambda p: False
+        mod.is_mountpoint = lambda p: True
+        mod.lower_bind_is_safe = lambda p: True
+        mod.remount_lower = lambda lower, rw, check=False: (rw_ok if rw else True)
+        mod.rsync_upper_to_lower = fake_rsync
+        mod.run = lambda cmd, check=True, quiet=False: FakeResult()
+        mod.sync_upper_attrs = lambda *a, **kw: None
+
+        def restore():
+            for k, v in orig.items():
+                setattr(mod, k, v)
+
+        return cfg, upper, calls, restore
+
+    def test_flush_preserves_upper_on_failure(self) -> bool:
+        """Regression: a FAILED flush must keep the upper and must report failure.
+
+        The upper is the only copy of the cached writes. The old code deleted and
+        recreated it unconditionally -- outside the 'if ok:' branch -- so a failed
+        rsync discarded every pending write and the overlay was remounted with an
+        empty upper, exposing the older lower content ('files reverted to an older
+        version'). The failure branch also never incremented 'errors', so flush()
+        returned True and cron/systemd recorded a success."""
+        log_test("\n>>> Test: failed flush preserves upper and reports failure", "INFO")
+
+        try:
+            mod = load_writecache_module()
+        except Exception as e:
+            log_test(f"Could not import omv-writecache: {e}", "FAIL")
+            return False
+
+        ok_all = True
+
+        # 1) rsync fails -> upper preserved, flush() reports False.
+        with tempfile.TemporaryDirectory() as td:
+            cfg, upper, calls, restore = self._fake_flush_env(mod, Path(td), rsync_ok=False)
+            try:
+                result = mod.flush(cfg)
+            finally:
+                restore()
+
+            survived = (upper / "pending.log").is_file() and \
+                       (upper / "pending.log").read_text() == "cached-data"
+            log_test(f"  failed flush keeps cached data: {'OK' if survived else 'FAIL'}",
+                     "SUCCESS" if survived else "FAIL")
+            reported = (result is False)
+            log_test(f"  failed flush returns False: {'OK' if reported else 'FAIL'} (got {result})",
+                     "SUCCESS" if reported else "FAIL")
+            ok_all = ok_all and survived and reported
+
+        # 2) Control: rsync succeeds -> upper IS cleared and flush() reports True.
+        #    Proves the guard is conditional, not a blanket "never clear".
+        with tempfile.TemporaryDirectory() as td:
+            cfg, upper, calls, restore = self._fake_flush_env(mod, Path(td), rsync_ok=True)
+            try:
+                result = mod.flush(cfg)
+            finally:
+                restore()
+
+            cleared = not (upper / "pending.log").exists()
+            log_test(f"  successful flush clears upper: {'OK' if cleared else 'FAIL'}",
+                     "SUCCESS" if cleared else "FAIL")
+            reported = (result is True)
+            log_test(f"  successful flush returns True: {'OK' if reported else 'FAIL'} (got {result})",
+                     "SUCCESS" if reported else "FAIL")
+            ok_all = ok_all and cleared and reported
+
+        log_test("flush upper preservation: " + ("OK" if ok_all else "FAIL"),
+                 "SUCCESS" if ok_all else "FAIL")
+        return ok_all
+
+    def test_flush_aborts_on_readonly_lower(self) -> bool:
+        """Regression: a lower that cannot be remounted read-write must abort the
+        transfer for that path, not run rsync into a read-only target.
+
+        remount_lower() defaults to check=False and only logs REMOUNT_FAILED, so
+        the old code fell straight through into rsync, which then failed for every
+        file -- and (before the fix above) took the upper down with it."""
+        log_test("\n>>> Test: flush aborts when lower cannot be made read-write", "INFO")
+
+        try:
+            mod = load_writecache_module()
+        except Exception as e:
+            log_test(f"Could not import omv-writecache: {e}", "FAIL")
+            return False
+
+        with tempfile.TemporaryDirectory() as td:
+            # rsync would succeed if it ran; the RW failure must stop it first.
+            cfg, upper, calls, restore = self._fake_flush_env(
+                mod, Path(td), rsync_ok=True, rw_ok=False)
+            try:
+                result = mod.flush(cfg)
+            finally:
+                restore()
+
+            # Assert inside the context: leaving it deletes the fake workspace.
+            skipped = (calls["rsync"] == 0)
+            log_test(f"  rsync not attempted on read-only lower: "
+                     f"{'OK' if skipped else 'FAIL'} (attempts={calls['rsync']})",
+                     "SUCCESS" if skipped else "FAIL")
+            survived = (upper / "pending.log").is_file()
+            log_test(f"  upper preserved: {'OK' if survived else 'FAIL'}",
+                     "SUCCESS" if survived else "FAIL")
+            reported = (result is False)
+            log_test(f"  flush returns False: {'OK' if reported else 'FAIL'} (got {result})",
+                     "SUCCESS" if reported else "FAIL")
+
+        ok_all = skipped and survived and reported
+        log_test("flush read-only lower guard: " + ("OK" if ok_all else "FAIL"),
+                 "SUCCESS" if ok_all else "FAIL")
+        return ok_all
+
+    def test_unmount_escalation_order(self) -> bool:
+        """Regression: force_unmount_with_retry() must try a plain umount before a
+        lazy one.
+
+        'umount -l' detaches the mount but keeps it alive for processes holding
+        open fds, and it leaves /proc/mounts immediately so it looks successful.
+        Those processes keep writing into the detached upper that the caller is
+        about to rsync and clear, so their writes are lost. Lazy must remain
+        available as the last resort (journald keeps /var/log busy, and refusing
+        would break flush entirely) but must never be the first attempt."""
+        log_test("\n>>> Test: unmount escalates plain -> kill -> lazy", "INFO")
+
+        try:
+            mod = load_writecache_module()
+        except Exception as e:
+            log_test(f"Could not import omv-writecache: {e}", "FAIL")
+            return False
+
+        cmds: List[List[str]] = []
+
+        class FakeResult:
+            # Every unmount "fails" so the full escalation ladder is exercised
+            # and wait_for_unmount() is never entered.
+            returncode = 1
+            stdout = ""
+
+        orig_run = mod.run
+        orig_is_mp = mod.is_mountpoint
+        orig_is_ov = mod.is_overlay_mounted
+        try:
+            def fake_run(cmd, check=True, quiet=False):
+                cmds.append(list(cmd))
+                return FakeResult()
+
+            mod.run = fake_run
+            mod.is_mountpoint = lambda p: True
+            mod.is_overlay_mounted = lambda p: True
+            mod.force_unmount_with_retry(Path("/fake/busy"), max_retries=2)
+        finally:
+            mod.run = orig_run
+            mod.is_mountpoint = orig_is_mp
+            mod.is_overlay_mounted = orig_is_ov
+
+        def idx(pred) -> int:
+            for i, c in enumerate(cmds):
+                if pred(c):
+                    return i
+            return -1
+
+        plain = idx(lambda c: c[:1] == ["umount"] and "-l" not in c)
+        lazy = idx(lambda c: c[:1] == ["umount"] and "-l" in c)
+        fuser = idx(lambda c: c[:1] == ["fuser"])
+
+        ok_all = True
+
+        first_ok = (plain != -1 and (lazy == -1 or plain < lazy))
+        log_test(f"  plain umount tried before lazy: {'OK' if first_ok else 'FAIL'} "
+                 f"(plain@{plain} lazy@{lazy})", "SUCCESS" if first_ok else "FAIL")
+        ok_all &= first_ok
+
+        kill_ok = (fuser == -1 or (plain != -1 and plain < fuser))
+        log_test(f"  holders killed only after a plain umount failed: "
+                 f"{'OK' if kill_ok else 'FAIL'} (fuser@{fuser})",
+                 "SUCCESS" if kill_ok else "FAIL")
+        ok_all &= kill_ok
+
+        # Lazy must still be reachable, or busy paths like /var/log never unmount.
+        lazy_ok = (lazy != -1)
+        log_test(f"  lazy umount still available as last resort: "
+                 f"{'OK' if lazy_ok else 'FAIL'}", "SUCCESS" if lazy_ok else "FAIL")
+        ok_all &= lazy_ok
+
+        log_test("unmount escalation order: " + ("OK" if ok_all else "FAIL"),
+                 "SUCCESS" if ok_all else "FAIL")
+        return bool(ok_all)
+
     # ========== MAIN TEST RUNNER ==========
 
     def run(self) -> Dict[str, bool]:
@@ -1769,6 +2001,9 @@ class WriteCacheTest:
             "flush_enforces_dir_ownership": False,
             "live_overlay_dirs_parsing": False,
             "flush_lower_bind_safe": False,
+            "flush_preserves_upper_on_failure": False,
+            "flush_aborts_on_readonly_lower": False,
+            "unmount_escalation_order": False,
             "postfix_baseline": False,
             "postfix_after_mount": False,
             "postfix_after_flush": False,
@@ -1785,6 +2020,13 @@ class WriteCacheTest:
 
             # Unit test: live overlay dir parsing (no mounting required)
             results["live_overlay_dirs_parsing"] = self.test_live_overlay_dirs_parsing()
+
+            # Unit tests: flush failure paths and unmount escalation. These run
+            # against a fake workspace and touch no real mounts, so they are safe
+            # to run before anything is mounted.
+            results["flush_preserves_upper_on_failure"] = self.test_flush_preserves_upper_on_failure()
+            results["flush_aborts_on_readonly_lower"] = self.test_flush_aborts_on_readonly_lower()
+            results["unmount_escalation_order"] = self.test_unmount_escalation_order()
 
             # Mount
             log_test("\n>>> Test 1: mount", "INFO")
