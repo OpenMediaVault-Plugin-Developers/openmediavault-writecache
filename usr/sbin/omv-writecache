@@ -22,7 +22,7 @@ try:
 except Exception:
     yaml = None
 
-SCRIPT_VERSION = "0.1.2"
+SCRIPT_VERSION = "0.1.3"
 CONFIG = Path("/etc/omv-writecache/config.yaml")
 
 # Workspace root for overlay metadata (lower binds, upperdirs, workdirs).
@@ -550,27 +550,48 @@ def wait_for_unmount(path: Path, timeout: int = 10) -> bool:
     return False
 
 def force_unmount_with_retry(path: Path, max_retries: int = 3) -> bool:
-    """Forcefully unmount a path with retries and fuser killing if needed"""
+    """Unmount 'path', escalating only as far as necessary.
+
+    Ordering matters for data integrity. 'umount -l' detaches the mount from the
+    namespace immediately and it disappears from /proc/mounts right away, so it
+    looks like a success -- but the mount stays alive for every process that still
+    holds an open fd into it. Those processes keep writing into the detached
+    overlay's upper dir, which the caller is about to rsync and then delete, so
+    their writes are silently lost.
+
+    A plain umount fails cleanly with EBUSY instead, which is the honest answer.
+    It succeeds outright for idle targets (/var/tmp, /var/cache/apt/archives), so
+    those get a clean unmount with no loss window at all.
+
+    Lazy unmount is kept as the final fallback because busy targets like /var/log
+    (journald holds the active journal open) cannot be unmounted any other way,
+    and refusing would stop the flush from working at all. It is now logged as a
+    warning naming the fix: give that path a 'stopstart' entry in the services
+    list, or use rotateflush, so the writer releases its fds first.
+    """
     for attempt in range(max_retries):
         if not is_mountpoint(path) and not is_overlay_mounted(path):
             return True
 
-        # Try lazy unmount first
-        result = run(["umount", "-l", str(path)], check=False)
-        if result.returncode == 0:
+        # Escalate to killing holders only after a plain unmount has already
+        # failed once, so a momentarily busy mount doesn't take journald with it.
+        if attempt > 0:
+            log(f"FORCE_UNMOUNT_RETRY {attempt}: Killing processes using {path}")
+            run(["fuser", "-km", str(path)], check=False)
+            time.sleep(0.5)
+
+        if run(["umount", str(path)], check=False).returncode == 0:
             if wait_for_unmount(path, 5):
                 return True
 
-        # If that fails, try to kill processes using the mountpoint
-        if attempt < max_retries - 1:  # Don't do this on the last attempt
-            log(f"FORCE_UNMOUNT_RETRY {attempt + 1}: Killing processes using {path}")
-            run(["fuser", "-km", str(path)], check=False)
+    if not is_mountpoint(path) and not is_overlay_mounted(path):
+        return True
 
-            # Try regular unmount after killing processes
-            result = run(["umount", str(path)], check=False)
-            if result.returncode == 0:
-                if wait_for_unmount(path, 5):
-                    return True
+    log(f"LAZY_UNMOUNT: {path} still busy after {max_retries} attempts; detaching. "
+        f"Writes from processes still holding it may be lost -- consider a "
+        f"'stopstart' services entry for whatever writes to {path}.", "WARN")
+    if run(["umount", "-l", str(path)], check=False).returncode == 0:
+        return wait_for_unmount(path, 5)
 
     return False
 
@@ -1067,14 +1088,16 @@ def flush_pending_on_boot(cfg: dict, workspace_root: Path):
 
             ok = False
             try:
-                remount_lower(lower, rw=True)
-                changed, bad = scrub_bad_specials(upper)
-                if changed:
-                    log(f"SCRUBBED_UPPER: specials={len(bad)} under {upper}")
-                ok = rsync_upper_to_lower(str(upper), str(lower),
-                                          enforce_uid=entry.uid,
-                                          enforce_gid=entry.gid,
-                                          enforce_mode=entry.perms)
+                if not remount_lower(lower, rw=True):
+                    log(f"LOWER_RW_FAILED: {lower} - skipping boot flush of {p}", "ERROR")
+                else:
+                    changed, bad = scrub_bad_specials(upper)
+                    if changed:
+                        log(f"SCRUBBED_UPPER: specials={len(bad)} under {upper}")
+                    ok = rsync_upper_to_lower(str(upper), str(lower),
+                                              enforce_uid=entry.uid,
+                                              enforce_gid=entry.gid,
+                                              enforce_mode=entry.perms)
             finally:
                 try:
                     remount_lower(lower, rw=False)
@@ -1410,19 +1433,22 @@ def flush(cfg):
 
         ok = False
         try:
-            # RW for rsync
-            remount_lower(lower, rw=True)
+            # RW for rsync. If the lower cannot be made writable, rsync would fail
+            # for every single file; skip the transfer instead of running it against
+            # a read-only target. ok stays False so the upper is preserved below.
+            if not remount_lower(lower, rw=True):
+                log(f"LOWER_RW_FAILED: {lower} - skipping flush of {p}", "ERROR")
+            else:
+                # scrub before syncing (whiteouts/opaque markers)
+                changed, bad = scrub_bad_specials(upper)
+                if changed:
+                    log(f"SCRUBBED_UPPER: specials={len(bad)} under {upper}")
 
-            # scrub before syncing (whiteouts/opaque markers)
-            changed, bad = scrub_bad_specials(upper)
-            if changed:
-                log(f"SCRUBBED_UPPER: specials={len(bad)} under {upper}")
-
-            # actual flush
-            ok = rsync_upper_to_lower(str(upper), str(lower),
-                                      enforce_uid=entry.uid,
-                                      enforce_gid=entry.gid,
-                                      enforce_mode=entry.perms)
+                # actual flush
+                ok = rsync_upper_to_lower(str(upper), str(lower),
+                                          enforce_uid=entry.uid,
+                                          enforce_gid=entry.gid,
+                                          enforce_mode=entry.perms)
 
         except Exception as e:
             errors += 1
@@ -1448,18 +1474,28 @@ def flush(cfg):
                 errors += 1
                 log(f"CLEAR_UPPER_FAILED: {upper} - {e}", "ERROR")
         else:
-            log(f"FLUSH_FAILED: {p}", "ERROR")
+            errors += 1
+            log(f"FLUSH_FAILED: {p} - upper preserved for retry", "ERROR")
 
-        # Completely recreate both upper and work directories to avoid reuse conflicts
+        # Recreate the upper ONLY after a successful flush. When the flush failed
+        # the upper still holds the only copy of the cached writes: deleting it here
+        # would discard them, and the overlay remounted below would then expose the
+        # older lower content instead (files appear to revert to an older version).
+        # flush_pending_on_boot() has always preserved the upper on failure; this
+        # path is being brought in line with it.
         try:
-            # Remove and recreate upper directory
-            if upper.exists():
-                shutil.rmtree(upper, ignore_errors=True)
-            upper.mkdir(parents=True, exist_ok=True)
-            sync_upper_attrs(upper, p, entry.uid, entry.gid, entry.perms)
-            log(f"RECREATED_UPPERDIR: {upper}")
+            if ok:
+                if upper.exists():
+                    shutil.rmtree(upper, ignore_errors=True)
+                upper.mkdir(parents=True, exist_ok=True)
+                sync_upper_attrs(upper, p, entry.uid, entry.gid, entry.perms)
+                log(f"RECREATED_UPPERDIR: {upper}")
+            else:
+                upper.mkdir(parents=True, exist_ok=True)
+                log(f"PRESERVED_UPPERDIR: {upper} (pending flush retry)", "WARN")
 
-            # Remove and recreate work directory
+            # The workdir is overlayfs scratch space and never holds user data, so
+            # it is always recreated to give the remount below a clean one.
             if work.exists():
                 shutil.rmtree(work, ignore_errors=True)
             work.mkdir(parents=True, exist_ok=True)
