@@ -21,6 +21,9 @@ data:
       prop: details
       sortable: true
       flexGrow: 3
+  sorters:
+    - dir: desc
+      prop: date
   request:
     service: LogFile
     method: getList
