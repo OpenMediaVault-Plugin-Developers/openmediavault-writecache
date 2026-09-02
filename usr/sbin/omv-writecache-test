@@ -1970,6 +1970,70 @@ class WriteCacheTest:
                  "SUCCESS" if ok_all else "FAIL")
         return bool(ok_all)
 
+    def test_unmount_skips_kill_for_var_log(self) -> bool:
+        """Regression: force_unmount_with_retry(/var/log) must never run 'fuser'.
+
+        journald/rsyslog are respawned by systemd and reopen /var/log within
+        milliseconds, so the kill escalation can never make a plain umount win --
+        it only SIGKILLs journald plus every other process with an fd on that
+        filesystem, twice, before falling back to lazy anyway. For paths in
+        LAZY_UNMOUNT_PATHS the code must go plain umount -> lazy, with no kill."""
+        log_test("\n>>> Test: /var/log unmount skips fuser kill", "INFO")
+
+        try:
+            mod = load_writecache_module()
+        except Exception as e:
+            log_test(f"Could not import omv-writecache: {e}", "FAIL")
+            return False
+
+        cmds: List[List[str]] = []
+
+        class FakeResult:
+            returncode = 1
+            stdout = ""
+
+        orig_run = mod.run
+        orig_is_mp = mod.is_mountpoint
+        orig_is_ov = mod.is_overlay_mounted
+        try:
+            def fake_run(cmd, check=True, quiet=False):
+                cmds.append(list(cmd))
+                return FakeResult()
+
+            mod.run = fake_run
+            mod.is_mountpoint = lambda p: True
+            mod.is_overlay_mounted = lambda p: True
+            mod.force_unmount_with_retry(Path("/var/log"), max_retries=3)
+        finally:
+            mod.run = orig_run
+            mod.is_mountpoint = orig_is_mp
+            mod.is_overlay_mounted = orig_is_ov
+
+        ran_fuser = any(c[:1] == ["fuser"] for c in cmds)
+        ran_plain = any(c[:1] == ["umount"] and "-l" not in c for c in cmds)
+        ran_lazy = any(c[:1] == ["umount"] and "-l" in c for c in cmds)
+
+        ok_all = True
+
+        no_kill = not ran_fuser
+        log_test(f"  fuser never invoked for /var/log: {'OK' if no_kill else 'FAIL'}",
+                 "SUCCESS" if no_kill else "FAIL")
+        ok_all &= no_kill
+
+        plain_first = ran_plain
+        log_test(f"  plain umount still attempted first: {'OK' if plain_first else 'FAIL'}",
+                 "SUCCESS" if plain_first else "FAIL")
+        ok_all &= plain_first
+
+        lazy_last = ran_lazy
+        log_test(f"  lazy umount still reached as fallback: {'OK' if lazy_last else 'FAIL'}",
+                 "SUCCESS" if lazy_last else "FAIL")
+        ok_all &= lazy_last
+
+        log_test("var/log unmount skips kill: " + ("OK" if ok_all else "FAIL"),
+                 "SUCCESS" if ok_all else "FAIL")
+        return bool(ok_all)
+
     # ========== MAIN TEST RUNNER ==========
 
     def run(self) -> Dict[str, bool]:
@@ -2027,6 +2091,7 @@ class WriteCacheTest:
             results["flush_preserves_upper_on_failure"] = self.test_flush_preserves_upper_on_failure()
             results["flush_aborts_on_readonly_lower"] = self.test_flush_aborts_on_readonly_lower()
             results["unmount_escalation_order"] = self.test_unmount_escalation_order()
+            results["unmount_skips_kill_for_var_log"] = self.test_unmount_skips_kill_for_var_log()
 
             # Mount
             log_test("\n>>> Test 1: mount", "INFO")

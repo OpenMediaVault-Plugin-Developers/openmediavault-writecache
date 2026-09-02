@@ -39,6 +39,13 @@ DEFAULT_WORKSPACE_ROOT = Path("/run/omv-writecache")
 DEFAULT_LOG_FILE = "/var/log/omv-writecache.log"
 DEFAULTS_FILE = "/etc/default/omv-writecache"
 
+# Mountpoints whose writer is a supervised daemon that would just respawn and
+# reopen the mount within milliseconds (journald/rsyslog on /var/log). Killing
+# holders there never lets a plain umount win -- it only SIGKILLs journald plus
+# every other process with an fd on that filesystem, twice, before falling back
+# to the lazy unmount anyway. For these, skip the kill and go straight to lazy.
+LAZY_UNMOUNT_PATHS = {"/var/log"}
+
 def get_log_file():
     log_file = DEFAULT_LOG_FILE
     if os.path.exists(DEFAULTS_FILE):
@@ -568,14 +575,21 @@ def force_unmount_with_retry(path: Path, max_retries: int = 3) -> bool:
     and refusing would stop the flush from working at all. It is now logged as a
     warning naming the fix: give that path a 'stopstart' entry in the services
     list, or use rotateflush, so the writer releases its fds first.
+
+    Paths in LAZY_UNMOUNT_PATHS skip the kill escalation entirely: their writer
+    is a supervised daemon that respawns and reopens the mount before the retry
+    umount runs, so the kill can never succeed and only harms bystanders. One
+    honest plain umount is still attempted (it wins if the path happens to be
+    idle), then it goes straight to the lazy fallback.
     """
+    skip_kill = str(path).rstrip("/") in LAZY_UNMOUNT_PATHS
     for attempt in range(max_retries):
         if not is_mountpoint(path) and not is_overlay_mounted(path):
             return True
 
         # Escalate to killing holders only after a plain unmount has already
         # failed once, so a momentarily busy mount doesn't take journald with it.
-        if attempt > 0:
+        if attempt > 0 and not skip_kill:
             log(f"FORCE_UNMOUNT_RETRY {attempt}: Killing processes using {path}")
             run(["fuser", "-km", str(path)], check=False)
             time.sleep(0.5)
