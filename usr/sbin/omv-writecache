@@ -22,7 +22,7 @@ try:
 except Exception:
     yaml = None
 
-SCRIPT_VERSION = "0.1.3"
+SCRIPT_VERSION = "0.1.4"
 CONFIG = Path("/etc/omv-writecache/config.yaml")
 
 # Workspace root for overlay metadata (lower binds, upperdirs, workdirs).
@@ -556,7 +556,7 @@ def wait_for_unmount(path: Path, timeout: int = 10) -> bool:
         time.sleep(0.5)
     return False
 
-def force_unmount_with_retry(path: Path, max_retries: int = 3) -> bool:
+def force_unmount_with_retry(path: Path, max_retries: int = 3, allow_kill: bool = True) -> bool:
     """Unmount 'path', escalating only as far as necessary.
 
     Ordering matters for data integrity. 'umount -l' detaches the mount from the
@@ -581,8 +581,16 @@ def force_unmount_with_retry(path: Path, max_retries: int = 3) -> bool:
     umount runs, so the kill can never succeed and only harms bystanders. One
     honest plain umount is still attempted (it wins if the path happens to be
     idle), then it goes straight to the lazy fallback.
+
+    allow_kill=False disables the SIGKILL escalation for this call regardless of
+    the path. The flush of a 'flush'-policy directory passes this: SIGKILLing the
+    daemon that owns the data (rrdcached, a database) to win an unmount risks a
+    torn on-disk state and leaves a stale pidfile that blocks the restart -- far
+    worse than falling through to the lazy detach, which at least keeps the
+    writer alive. The real fix for a busy flush target is a 'stopstart' services
+    entry so the writer releases its fds before the flush.
     """
-    skip_kill = str(path).rstrip("/") in LAZY_UNMOUNT_PATHS
+    skip_kill = (not allow_kill) or (str(path).rstrip("/") in LAZY_UNMOUNT_PATHS)
     for attempt in range(max_retries):
         if not is_mountpoint(path) and not is_overlay_mounted(path):
             return True
@@ -739,7 +747,7 @@ def load_config():
         "flush_on_shutdown": True,
         "flush_daily": False,
         "paths": "/var/log = drop\n/var/tmp = drop\n/var/cache/apt/archives = drop\n/var/lib/apt/lists = drop\n/var/lib/dpkg/updates = flush\n",
-        "services": "",
+        "services": "monit = stopdailystart\nrrdcached = stopstart\n",
     }
     if not CONFIG.exists() or yaml is None:
         log("CONFIG: Using defaults", "DEBUG")
@@ -882,34 +890,65 @@ def _run_systemctl(action, name):
         log(f"{label}_ERROR: {name} - {e}", "ERROR")
         return False
 
-def stop_services(cfg):
-    """Stop services with action=stopstart/stopdailystart before a flush."""
-    services_text = cfg.get("services", "") or ""
-    for entry in parse_services(services_text):
-        if entry.action == "stopstart":
-            _run_systemctl("stop", entry.name)
-        elif entry.action == "stopdailystart" and DAILY_FLUSH:
-            _run_systemctl("stop", entry.name)
+def _unit_is_active(name):
+    """True if the systemd unit is currently active (running)."""
+    try:
+        return subprocess.run(
+            ["systemctl", "is-active", "--quiet", "--", name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode == 0
+    except Exception:
+        return False
 
-def restart_services(cfg):
+def stop_services(cfg):
+    """Stop services with action=stopstart/stopdailystart before a flush.
+
+    Only services that are currently running are stopped, and the set of names
+    actually taken down is returned so restart_services() starts back exactly
+    those. A service the administrator deliberately left disabled (e.g.
+    rrdcached on a system with OMV monitoring turned off) is never touched.
+    """
+    stopped = set()
+    for entry in parse_services(cfg.get("services", "") or ""):
+        if entry.action == "stopstart" or (entry.action == "stopdailystart" and DAILY_FLUSH):
+            if not _unit_is_active(entry.name):
+                log(f"SERVICE_STOP_SKIP: {entry.name} (not active)", "DEBUG")
+                continue
+            if _run_systemctl("stop", entry.name):
+                stopped.add(entry.name)
+    return stopped
+
+def restart_services(cfg, stopped=None):
     """Reload, restart, or start services after a non-shutdown flush.
-    Actions ending in 'daily' only run when DAILY_FLUSH is set."""
-    services_text = cfg.get("services", "") or ""
-    entries = parse_services(services_text)
-    if not entries:
-        return
+
+    Actions ending in 'daily' only run when DAILY_FLUSH is set. A stopstart /
+    stopdailystart service is started again only if this run actually stopped it
+    (tracked in 'stopped'). reload / restart actions are skipped when the unit
+    is not active, so a flush never starts a service that was not already
+    running.
+
+    Stopped units are started back in reverse of the listed order: stop_services
+    takes them down top-to-bottom, so a watchdog such as monit -- listed first
+    and stopped first -- comes back up last, after the services it monitors, and
+    does not briefly see them as down.
+    """
+    stopped = stopped or set()
+    entries = parse_services(cfg.get("services", "") or "")
+
     for entry in entries:
-        if entry.action == "stopstart":
+        if entry.action in ("reload", "restart", "reloaddaily", "restartdaily"):
+            if entry.action.endswith("daily") and not DAILY_FLUSH:
+                continue
+            action = "reload" if entry.action.startswith("reload") else "restart"
+            if not _unit_is_active(entry.name):
+                log(f"SERVICE_{action.upper()}_SKIP: {entry.name} (not active)", "DEBUG")
+                continue
+            _run_systemctl(action, entry.name)
+
+    for entry in reversed(entries):
+        if entry.action in ("stopstart", "stopdailystart") and entry.name in stopped:
             _run_systemctl("start", entry.name)
-        elif entry.action == "stopdailystart":
-            if DAILY_FLUSH:
-                _run_systemctl("start", entry.name)
-        elif entry.action in ("reloaddaily", "restartdaily"):
-            if DAILY_FLUSH:
-                action = "reload" if entry.action == "reloaddaily" else "restart"
-                _run_systemctl(action, entry.name)
-        else:
-            _run_systemctl(entry.action, entry.name)
 
 def sanitize_name(p):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", p.strip("/"))
@@ -1415,7 +1454,11 @@ def flush(cfg):
         #    overlay (which would make the lower bind 'overlay'-sourced and unsafe).
         if is_overlay_mounted(p):
             log(f"PRE-FLUSH_UNMOUNT: {p}")
-            if not force_unmount_with_retry(p):
+            # allow_kill=False: never SIGKILL the daemon that owns this data just
+            # to force the unmount. A clean 'stopstart' services entry is the way
+            # to make a busy flush target idle; absent that, the lazy detach
+            # fallback is still far safer than a torn database + stale pidfile.
+            if not force_unmount_with_retry(p, allow_kill=False):
                 log(f"PRE-FLUSH_UNMOUNT_FAILED: {p}", "ERROR")
                 errors += 1
                 continue
@@ -1598,11 +1641,10 @@ def cmd_mount():
 def cmd_flush():
     log("FLUSH_CMD: Starting flush command")
     cfg = load_config()
-    if RESTART_SERVICES:
-        stop_services(cfg)
+    stopped = stop_services(cfg) if RESTART_SERVICES else set()
     ok = flush(cfg)
     if RESTART_SERVICES:
-        restart_services(cfg)
+        restart_services(cfg, stopped)
     sys.exit(0 if ok else 1)
 
 def cmd_rotateflush():

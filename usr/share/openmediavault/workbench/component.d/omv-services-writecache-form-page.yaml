@@ -312,9 +312,9 @@ data:
       - type: textarea
         name: services
         label: _("Services to reload/restart after flush")
-        rows: 3
+        rows: 4
         monospace: true
-        hint: '_("One entry per line: &lt;service&gt; = reload|restart|stopstart|reloaddaily|restartdaily|stopdailystart<br/>Services listed here will be reloaded or restarted after a manual or scheduled flush (not on shutdown).<br/><b>stopstart</b> &mdash; stop before flush, start after flush<br/><b>reloaddaily / restartdaily / stopdailystart</b> &mdash; same as above but only on daily scheduled flushes, not hourly<br/>Example:<br/>&nbsp;&nbsp;rsyslog = restartdaily<br/>&nbsp;&nbsp;nginx = reload<br/>&nbsp;&nbsp;docker = stopdailystart")'
+        hint: '_("One entry per line: &lt;service&gt; = reload|restart|stopstart|reloaddaily|restartdaily|stopdailystart<br/>Services listed here will be reloaded or restarted after a manual or scheduled flush (not on shutdown).<br/><b>stopstart</b> &mdash; stop before flush, start after flush<br/><b>reloaddaily / restartdaily / stopdailystart</b> &mdash; same as above but only on daily scheduled flushes, not hourly<br/>Only services that are currently running are acted on &mdash; a stopped or disabled service is left alone, and a stopstart service is started again only if this flush stopped it.<br/><b>rrdcached</b> and <b>monit</b> are seeded here by default so the flush of their data directories does not have to force them down; remove them if you do not overlay <code>/var/lib/rrdcached</code>, <code>/var/lib/openmediavault/rrd</code> or <code>/var/lib/monit</code>.<br/>Example:<br/>&nbsp;&nbsp;rsyslog = restartdaily<br/>&nbsp;&nbsp;nginx = reload<br/>&nbsp;&nbsp;docker = stopdailystart")'
       - type: textarea
         name: status
         label: _("Status")
