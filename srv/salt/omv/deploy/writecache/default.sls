@@ -221,8 +221,15 @@ writecache_setup_service_enable:
     - require:
       - file: omv-writecache-setup_service
     - watch:
-      - file: configure_writecache_config
       - file: omv-writecache-setup_service
+
+writecache_reconfigure_overlays:
+  cmd.run:
+    - name: /usr/sbin/omv-writecache remount --reconfigure
+    - onchanges:
+      - file: configure_writecache_config
+    - require:
+      - service: writecache_setup_service_enable
 
 {% else %}
 

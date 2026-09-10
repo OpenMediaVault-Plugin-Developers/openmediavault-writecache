@@ -72,6 +72,7 @@ _LOCK_FD = None
 NO_FLUSH = False
 RESTART_SERVICES = False
 DAILY_FLUSH = False
+RECONFIGURE = False
 LOG_ENABLED = True
 
 def log(msg: str, level: str = "INFO"):
@@ -627,10 +628,10 @@ def mounts_under(prefix: Path) -> list[Path]:
     # deepest-first so children go away before parents
     return sorted(pts, key=lambda p: len(str(p)), reverse=True)
 
-def unmount_all_under_workspace(workspace_root: Path):
+def unmount_all_under_workspace(workspace_root: Path, allow_kill: bool = True):
     for mp in mounts_under(workspace_root):
         log(f"WORKSPACE_UNMOUNT: {mp}")
-        force_unmount_with_retry(mp)
+        force_unmount_with_retry(mp, allow_kill=allow_kill)
 
 def remount_lower(lower: Path, rw: bool, check: bool = False) -> bool:
     """
@@ -1574,8 +1575,18 @@ def flush(cfg):
         "ERROR" if errors else "INFO")
     return errors == 0
 
-def unmount(cfg):
-    log("UNMOUNT_START: Beginning unmount operation")
+def unmount(cfg, allow_kill: bool = True):
+    """Tear down all overlays and (for RAM-backed workspaces) the workspace itself.
+
+    allow_kill=False is passed on the --reconfigure path (a settings change that
+    reshuffles overlays on a live system). There we must never SIGKILL a user's
+    process to win an unmount: a busy overlay lazy-detaches instead, and the
+    following 'mount' re-establishes it. The real shutdown/reboot teardown keeps
+    allow_kill=True, where lazy-detaching risks losing writes seconds before
+    power-off and a killed daemon no longer matters.
+    """
+    log("UNMOUNT_START: Beginning unmount operation"
+        + ("" if allow_kill else " (reconfigure: no kill escalation)"))
     ws_root = get_workspace_root(cfg)
     ws_type = get_workspace_type(cfg)
     items = list(parse_paths(cfg.get("paths","")))
@@ -1586,7 +1597,7 @@ def unmount(cfg):
         lower = lower_bind_for(ws_root, name)
         if is_overlay_mounted(lower):
             log(f"LOWER_OVERLAY_UNMOUNT: {lower}")
-            force_unmount_with_retry(lower)
+            force_unmount_with_retry(lower, allow_kill=allow_kill)
 
     # 2) unmount main overlays deepest-first
     paths = [Path(entry.path).resolve() for entry in items]
@@ -1595,15 +1606,15 @@ def unmount(cfg):
         lower = lower_bind_for(ws_root, name)
         if is_overlay_mounted(p):
             log(f"UNMOUNT: {p}")
-            force_unmount_with_retry(p)
+            force_unmount_with_retry(p, allow_kill=allow_kill)
         else:
             log(f"NOT_MOUNTED: {p}", "DEBUG")
         if is_mountpoint(lower):
             log(f"LOWER_UNMOUNT: {lower}")
-            force_unmount_with_retry(lower)
+            force_unmount_with_retry(lower, allow_kill=allow_kill)
 
     # 3) aggressively unmount anything still mounted under the workspace root
-    unmount_all_under_workspace(ws_root)
+    unmount_all_under_workspace(ws_root, allow_kill=allow_kill)
 
     # 4) if workspace is persistent, ensure 'drop' policies actually drop changes
     # (otherwise upper/ content survives reboot and reappears after next mount)
@@ -1616,7 +1627,7 @@ def unmount(cfg):
         zdev = device_for_mount(ws_root) if ws_type == "zram" else ""
         if is_mountpoint(ws_root):
             log(f"WORKSPACE_UNMOUNT_ROOT: {ws_root}")
-            force_unmount_with_retry(ws_root)
+            force_unmount_with_retry(ws_root, allow_kill=allow_kill)
         else:
             log(f"WORKSPACE_ROOT_NOT_MOUNTED: {ws_root}", "DEBUG")
         if ws_type == "zram" and zdev.startswith("/dev/zram"):
@@ -1660,7 +1671,10 @@ def cmd_unmount():
     elif cfg.get("flush_on_shutdown", True):
         log("PRE_UNMOUNT_FLUSH: Flushing before unmount")
         flush(cfg)
-    unmount(cfg)
+    # --reconfigure: a settings change reshuffling overlays on a live system.
+    # Never SIGKILL holders to force an unmount there; let a busy overlay
+    # lazy-detach and rely on the following mount to re-establish it.
+    unmount(cfg, allow_kill=not RECONFIGURE)
 
 def cmd_rotateunmount():
     log("ROTATEUNMOUNT_CMD: Starting rotate+unmount command")
@@ -1769,14 +1783,14 @@ def cmd_algos():
 def main():
     if len(sys.argv) < 2:
         print(
-            "Usage: omv-writecache <command> [--no-flush] [--restart] [--daily]\n"
+            "Usage: omv-writecache <command> [--no-flush] [--restart] [--daily] [--reconfigure]\n"
             "Commands:\n"
             "  mount\n"
             "  rotateflush [--restart]\n"
             "  flush [--restart]\n"
-            "  unmount [--no-flush]\n"
-            "  rotateunmount\n"
-            "  remount\n"
+            "  unmount [--no-flush] [--reconfigure]\n"
+            "  rotateunmount [--reconfigure]\n"
+            "  remount [--reconfigure]\n"
             "  status\n"
             "  df\n"
             "  algos\n"
@@ -1787,6 +1801,7 @@ def main():
     global NO_FLUSH
     global RESTART_SERVICES
     global DAILY_FLUSH
+    global RECONFIGURE
     global LOG_ENABLED
 
     args = sys.argv[1:]
@@ -1803,6 +1818,10 @@ def main():
     if "--daily" in args:
         DAILY_FLUSH = True
         args.remove("--daily")
+
+    if "--reconfigure" in args:
+        RECONFIGURE = True
+        args.remove("--reconfigure")
 
     # Identify commands that should not lock and should not log
     no_lock_no_log_cmds = {"df", "status", "version", "-v", "--version", "algos"}
@@ -1836,6 +1855,8 @@ def main():
             cmdline += " --restart"
         if DAILY_FLUSH:
             cmdline += " --daily"
+        if RECONFIGURE:
+            cmdline += " --reconfigure"
         log(f"SCRIPT_START: {cmdline}")
 
     if cmd == "mount":
