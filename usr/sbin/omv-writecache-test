@@ -1426,6 +1426,131 @@ class WriteCacheTest:
                  "SUCCESS" if ok else "FAIL")
         return ok
 
+    def test_reconfigure_unmount_no_kill(self) -> bool:
+        """unmount(cfg, allow_kill=False) -- the --reconfigure path taken on a
+        settings change -- must never 'fuser -km' a busy overlay, while a plain
+        unmount (shutdown/reboot) still escalates. A busy overlay must still
+        lazy-detach so the reconfigure can proceed (issue #8)."""
+        log_test("\n>>> Test: --reconfigure unmount skips the kill escalation", "INFO")
+
+        try:
+            mod = load_writecache_module()
+        except Exception as e:
+            log_test(f"Could not import omv-writecache: {e}", "FAIL")
+            return False
+
+        target = "/srv/wc-reconfigure-test"
+        cfg = {
+            "workspace_type": "tmpfs",
+            "workspace_root": "/run/omv-writecache-test",
+            "paths": f"{target} = flush\n",
+        }
+
+        def collect(allow_kill: bool) -> List[List[str]]:
+            cmds: List[List[str]] = []
+
+            class FakeResult:
+                returncode = 1  # every umount "fails" -> full ladder is walked
+                stdout = ""
+
+            orig = {k: getattr(mod, k) for k in
+                    ("run", "is_mountpoint", "is_overlay_mounted", "get_mounts")}
+            try:
+                mod.run = lambda c, check=True, quiet=False: (cmds.append(list(c)) or FakeResult())
+                mod.is_mountpoint = lambda p: False
+                mod.is_overlay_mounted = lambda p: str(p) == target
+                mod.get_mounts = lambda: []
+                mod.unmount(cfg, allow_kill=allow_kill)
+            finally:
+                for k, v in orig.items():
+                    setattr(mod, k, v)
+            return cmds
+
+        recfg = collect(allow_kill=False)
+        shutd = collect(allow_kill=True)
+
+        def has(cmds, pred):
+            return any(pred(c) for c in cmds)
+
+        ok = True
+
+        recfg_no_fuser = not has(recfg, lambda c: c[:1] == ["fuser"])
+        log_test(f"  --reconfigure never runs fuser: {'OK' if recfg_no_fuser else 'FAIL'}",
+                 "SUCCESS" if recfg_no_fuser else "FAIL")
+        ok &= recfg_no_fuser
+
+        recfg_lazy = has(recfg, lambda c: c[:1] == ["umount"] and "-l" in c)
+        log_test(f"  --reconfigure still lazy-detaches a busy overlay: {'OK' if recfg_lazy else 'FAIL'}",
+                 "SUCCESS" if recfg_lazy else "FAIL")
+        ok &= recfg_lazy
+
+        shutd_fuser = has(shutd, lambda c: c[:1] == ["fuser"])
+        log_test(f"  plain unmount still escalates to fuser: {'OK' if shutd_fuser else 'FAIL'}",
+                 "SUCCESS" if shutd_fuser else "FAIL")
+        ok &= shutd_fuser
+
+        log_test("--reconfigure unmount kill guard: " + ("OK" if ok else "FAIL"),
+                 "SUCCESS" if ok else "FAIL")
+        return ok
+
+    def test_reconfigure_flag_parsing(self) -> bool:
+        """main() must parse 'remount --reconfigure' into RECONFIGURE=True and
+        drive cmd_unmount(); cmd_mount(), so the salt reconfigure state actually
+        reaches unmount(allow_kill=False) (issue #8)."""
+        log_test("\n>>> Test: --reconfigure flag is recognised by main()", "INFO")
+
+        try:
+            mod = load_writecache_module()
+        except Exception as e:
+            log_test(f"Could not import omv-writecache: {e}", "FAIL")
+            return False
+
+        import os as _os
+        seen = {"reconfigure": None, "order": []}
+
+        saved = {k: getattr(mod, k) for k in
+                 ("cmd_unmount", "cmd_mount", "check_and_create_lock",
+                  "release_lock", "ensure_persistent_journal")}
+        saved_argv = sys.argv[:]
+        saved_geteuid = _os.geteuid
+        try:
+            def fake_unmount():
+                seen["reconfigure"] = mod.RECONFIGURE
+                seen["order"].append("unmount")
+            mod.cmd_unmount = fake_unmount
+            mod.cmd_mount = lambda: seen["order"].append("mount")
+            mod.check_and_create_lock = lambda name: None
+            mod.release_lock = lambda: None
+            mod.ensure_persistent_journal = lambda: None
+            mod.RECONFIGURE = False
+            _os.geteuid = lambda: 0
+            sys.argv = ["omv-writecache", "remount", "--reconfigure"]
+            mod.main()
+        except SystemExit:
+            pass
+        finally:
+            for k, v in saved.items():
+                setattr(mod, k, v)
+            sys.argv = saved_argv
+            _os.geteuid = saved_geteuid
+            mod.RECONFIGURE = False
+
+        ok = True
+
+        parsed = (seen["reconfigure"] is True)
+        log_test(f"  RECONFIGURE set True during cmd_unmount: {'OK' if parsed else 'FAIL'}",
+                 "SUCCESS" if parsed else "FAIL")
+        ok &= parsed
+
+        ordered = (seen["order"] == ["unmount", "mount"])
+        log_test(f"  remount ran unmount then mount: {'OK' if ordered else 'FAIL'} ({seen['order']})",
+                 "SUCCESS" if ordered else "FAIL")
+        ok &= ordered
+
+        log_test("--reconfigure flag parsing: " + ("OK" if ok else "FAIL"),
+                 "SUCCESS" if ok else "FAIL")
+        return ok
+
     def test_dropin_file(self) -> bool:
         """Verify the workspace mount drop-in file exists with correct content (RAM-backed: tmpfs/zram)."""
         log_test("\n>>> Test: workspace mount drop-in file", "INFO")
@@ -2250,6 +2375,8 @@ class WriteCacheTest:
             results["parse_services_daily"] = self.test_parse_services_daily_actions()
             results["daily_flag_filtering"] = self.test_daily_flag_service_filtering()
             results["services_running_only"] = self.test_services_only_touch_running_units()
+            results["reconfigure_no_kill"] = self.test_reconfigure_unmount_no_kill()
+            results["reconfigure_flag"] = self.test_reconfigure_flag_parsing()
 
             # Create more files, then unmount
             log_test("\n>>> Prepare for unmount: create more files", "INFO")
