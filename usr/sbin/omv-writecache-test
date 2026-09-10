@@ -1267,8 +1267,10 @@ class WriteCacheTest:
         Verify that *daily service actions only fire when --daily is passed.
         Injects fake service names into the config, runs flush with and without
         --daily, and checks stdout for SERVICE_ log entries.
-        The service names are deliberately non-existent — the script logs the
-        attempt before calling systemctl, so entries appear regardless.
+        The service names are deliberately non-existent, so they are never
+        'active' and the script logs a SERVICE_<action>_SKIP line instead of
+        calling systemctl. The --daily gate is applied before the active check,
+        so a *daily entry produces no line at all without --daily.
         """
         log_test("\n>>> Test: --daily flag controls *daily service actions", "INFO")
         import yaml as _yaml
@@ -1309,41 +1311,39 @@ class WriteCacheTest:
             out_no_daily = run_flush(daily=False)
             log_test("Ran flush --restart (no --daily)", "DEBUG")
 
-            always_acted = f"SERVICE_RESTART: {always_svc}" in out_no_daily
-            daily_acted  = f"SERVICE_RESTART: {daily_svc}"  in out_no_daily
-            stop_stopped = f"SERVICE_STOP: {stop_svc}"      in out_no_daily
-            stop_started = f"SERVICE_START: {stop_svc}"     in out_no_daily
+            always_seen = f"SERVICE_RESTART_SKIP: {always_svc}" in out_no_daily
+            daily_seen  = daily_svc in out_no_daily
+            stop_seen   = stop_svc  in out_no_daily
 
-            log_test(f"  '{always_svc}' restarted (expected yes): {'OK' if always_acted else 'FAIL'}",
-                     "SUCCESS" if always_acted else "FAIL")
-            log_test(f"  '{daily_svc}' restarted (expected no):   {'OK' if not daily_acted else 'FAIL'}",
-                     "SUCCESS" if not daily_acted else "FAIL")
-            log_test(f"  '{stop_svc}' stopped (expected no):      {'OK' if not stop_stopped else 'FAIL'}",
-                     "SUCCESS" if not stop_stopped else "FAIL")
-            log_test(f"  '{stop_svc}' started (expected no):      {'OK' if not stop_started else 'FAIL'}",
-                     "SUCCESS" if not stop_started else "FAIL")
+            log_test(f"  '{always_svc}' considered (expected yes): {'OK' if always_seen else 'FAIL'}",
+                     "SUCCESS" if always_seen else "FAIL")
+            log_test(f"  '{daily_svc}' untouched (expected yes):   {'OK' if not daily_seen else 'FAIL'}",
+                     "SUCCESS" if not daily_seen else "FAIL")
+            log_test(f"  '{stop_svc}' untouched (expected yes):    {'OK' if not stop_seen else 'FAIL'}",
+                     "SUCCESS" if not stop_seen else "FAIL")
 
-            ok &= always_acted and not daily_acted and not stop_stopped and not stop_started
+            ok &= always_seen and not daily_seen and not stop_seen
 
             # --- Run with --daily ---
             out_daily = run_flush(daily=True)
             log_test("Ran flush --restart --daily", "DEBUG")
 
-            always_acted2 = f"SERVICE_RESTART: {always_svc}" in out_daily
-            daily_acted2  = f"SERVICE_RESTART: {daily_svc}"  in out_daily
-            stop_stopped2 = f"SERVICE_STOP: {stop_svc}"      in out_daily
-            stop_started2 = f"SERVICE_START: {stop_svc}"     in out_daily
+            always_seen2 = f"SERVICE_RESTART_SKIP: {always_svc}" in out_daily
+            daily_seen2  = f"SERVICE_RESTART_SKIP: {daily_svc}"  in out_daily
+            stop_seen2   = f"SERVICE_STOP_SKIP: {stop_svc}"      in out_daily
+            # non-existent units must never be started/stopped for real
+            stop_started2 = f"SERVICE_START: {stop_svc}"         in out_daily
 
-            log_test(f"  '{always_svc}' restarted (expected yes): {'OK' if always_acted2 else 'FAIL'}",
-                     "SUCCESS" if always_acted2 else "FAIL")
-            log_test(f"  '{daily_svc}' restarted (expected yes):  {'OK' if daily_acted2 else 'FAIL'}",
-                     "SUCCESS" if daily_acted2 else "FAIL")
-            log_test(f"  '{stop_svc}' stopped (expected yes):     {'OK' if stop_stopped2 else 'FAIL'}",
-                     "SUCCESS" if stop_stopped2 else "FAIL")
-            log_test(f"  '{stop_svc}' started (expected yes):     {'OK' if stop_started2 else 'FAIL'}",
-                     "SUCCESS" if stop_started2 else "FAIL")
+            log_test(f"  '{always_svc}' considered (expected yes): {'OK' if always_seen2 else 'FAIL'}",
+                     "SUCCESS" if always_seen2 else "FAIL")
+            log_test(f"  '{daily_svc}' considered (expected yes):  {'OK' if daily_seen2 else 'FAIL'}",
+                     "SUCCESS" if daily_seen2 else "FAIL")
+            log_test(f"  '{stop_svc}' stop considered (expected yes): {'OK' if stop_seen2 else 'FAIL'}",
+                     "SUCCESS" if stop_seen2 else "FAIL")
+            log_test(f"  '{stop_svc}' never started (expected yes): {'OK' if not stop_started2 else 'FAIL'}",
+                     "SUCCESS" if not stop_started2 else "FAIL")
 
-            ok &= always_acted2 and daily_acted2 and stop_stopped2 and stop_started2
+            ok &= always_seen2 and daily_seen2 and stop_seen2 and not stop_started2
 
         finally:
             if original_text is not None:
@@ -1352,6 +1352,77 @@ class WriteCacheTest:
                 cfg_path.unlink()
 
         log_test("--daily service filtering: " + ("OK" if ok else "FAIL"),
+                 "SUCCESS" if ok else "FAIL")
+        return ok
+
+    def test_services_only_touch_running_units(self) -> bool:
+        """stop_services()/restart_services() must only act on units that are
+        actually running, and restart_services() must start back only the ones
+        this run stopped -- so a flush never resurrects rrdcached (or anything)
+        on a box where OMV monitoring is deliberately disabled (issue #7)."""
+        log_test("\n>>> Test: services only act on running units", "INFO")
+
+        try:
+            mod = load_writecache_module()
+        except Exception as e:
+            log_test(f"Could not import omv-writecache: {e}", "FAIL")
+            return False
+
+        calls: List[Tuple[str, str]] = []
+        active = {"running-svc"}  # only this one is "active"
+
+        orig_active = mod._unit_is_active
+        orig_systemctl = mod._run_systemctl
+        orig_daily = mod.DAILY_FLUSH
+        try:
+            mod._unit_is_active = lambda name: name in active
+            def fake_systemctl(action, name):
+                calls.append((action, name))
+                return True
+            mod._run_systemctl = fake_systemctl
+            mod.DAILY_FLUSH = True
+
+            cfg = {"services": (
+                "running-svc = stopstart\n"
+                "stopped-svc = stopstart\n"
+                "disabled-monitoring = restart\n"
+            )}
+
+            stopped = mod.stop_services(cfg)
+            mod.restart_services(cfg, stopped)
+        finally:
+            mod._unit_is_active = orig_active
+            mod._run_systemctl = orig_systemctl
+            mod.DAILY_FLUSH = orig_daily
+
+        ok = True
+
+        stopped_running = ("stop", "running-svc") in calls
+        started_running = ("start", "running-svc") in calls
+        log_test(f"  running stopstart unit stopped+started: "
+                 f"{'OK' if stopped_running and started_running else 'FAIL'}",
+                 "SUCCESS" if stopped_running and started_running else "FAIL")
+        ok &= stopped_running and started_running
+
+        touched_stopped = any(n == "stopped-svc" for _, n in calls)
+        log_test(f"  inactive stopstart unit never touched: "
+                 f"{'OK' if not touched_stopped else 'FAIL'}",
+                 "SUCCESS" if not touched_stopped else "FAIL")
+        ok &= not touched_stopped
+
+        touched_disabled = any(n == "disabled-monitoring" for _, n in calls)
+        log_test(f"  inactive restart unit never started: "
+                 f"{'OK' if not touched_disabled else 'FAIL'}",
+                 "SUCCESS" if not touched_disabled else "FAIL")
+        ok &= not touched_disabled
+
+        returned_only_stopped = (stopped == {"running-svc"})
+        log_test(f"  stop_services() returned exactly what it stopped: "
+                 f"{'OK' if returned_only_stopped else 'FAIL'} ({sorted(stopped)})",
+                 "SUCCESS" if returned_only_stopped else "FAIL")
+        ok &= returned_only_stopped
+
+        log_test("services only act on running units: " + ("OK" if ok else "FAIL"),
                  "SUCCESS" if ok else "FAIL")
         return ok
 
@@ -2178,6 +2249,7 @@ class WriteCacheTest:
             results["disk_exhaustion"] = self.test_disk_space_exhaustion()
             results["parse_services_daily"] = self.test_parse_services_daily_actions()
             results["daily_flag_filtering"] = self.test_daily_flag_service_filtering()
+            results["services_running_only"] = self.test_services_only_touch_running_units()
 
             # Create more files, then unmount
             log_test("\n>>> Prepare for unmount: create more files", "INFO")
