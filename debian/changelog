@@ -1,9 +1,11 @@
 openmediavault-writecache (8.2.4) stable; urgency=low
 
-  * Stop SIGKILLing the daemon that owns a flush target
+  * Stop SIGKILLing the daemon that owns a flush target.
   * Seed the services list with "monit = stopdailystart" and
     "rrdcached = stopstart" so the daily flush stops those daemons cleanly first.
   * Only act on services that are actually running.
+  * Reconfigure overlays live on a settings change instead of restarting the
+    teardown service.
 
  -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Thu, 10 Sep 2026 11:30:29 +0000
 
