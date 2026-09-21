@@ -1510,7 +1510,8 @@ class WriteCacheTest:
 
         saved = {k: getattr(mod, k) for k in
                  ("cmd_unmount", "cmd_mount", "check_and_create_lock",
-                  "release_lock", "ensure_persistent_journal")}
+                  "release_lock", "ensure_persistent_journal",
+                  "_unit_is_active", "_run_systemctl")}
         saved_argv = sys.argv[:]
         saved_geteuid = _os.geteuid
         try:
@@ -1522,6 +1523,11 @@ class WriteCacheTest:
             mod.check_and_create_lock = lambda name: None
             mod.release_lock = lambda: None
             mod.ensure_persistent_journal = lambda: None
+            # remount now also wraps the Services list around unmount/mount
+            # (like cmd_flush already did); never let this test touch the
+            # real host's units.
+            mod._unit_is_active = lambda name: False
+            mod._run_systemctl = lambda action, name: True
             mod.RECONFIGURE = False
             _os.geteuid = lambda: 0
             sys.argv = ["omv-writecache", "remount", "--reconfigure"]
@@ -1548,6 +1554,177 @@ class WriteCacheTest:
         ok &= ordered
 
         log_test("--reconfigure flag parsing: " + ("OK" if ok else "FAIL"),
+                 "SUCCESS" if ok else "FAIL")
+        return ok
+
+    def test_private_tmp_detection(self) -> bool:
+        """A remount must detect running units with PrivateTmp=yes and warn
+        about them instead of restarting them -- their host-backed private
+        tmp directory under /tmp or /var/tmp is wiped and recreated by the
+        remount, so their NEXT reload/restart (not this one) would otherwise
+        fail with 226/NAMESPACE with no admin-visible explanation (issue #10).
+        """
+        log_test("\n>>> Test: PrivateTmp units are detected and warned about, "
+                 "not restarted, on remount", "INFO")
+
+        try:
+            mod = load_writecache_module()
+        except Exception as e:
+            log_test(f"Could not import omv-writecache: {e}", "FAIL")
+            return False
+
+        import os as _os
+
+        running_units = ["has-private-tmp.service", "no-private-tmp.service",
+                          "unrelated.service"]
+        private_tmp_units = {"has-private-tmp.service"}
+
+        class FakeResult:
+            def __init__(self, stdout):
+                self.stdout = stdout
+                self.returncode = 0
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["systemctl", "list-units"]:
+                return FakeResult("\n".join(f"{u} loaded active running" for u in running_units) + "\n")
+            if cmd[:2] == ["systemctl", "show"]:
+                unit = cmd[2]
+                return FakeResult("yes\n" if unit in private_tmp_units else "no\n")
+            return FakeResult("")
+
+        saved = {k: getattr(mod, k) for k in
+                 ("cmd_unmount", "cmd_mount", "check_and_create_lock",
+                  "release_lock", "ensure_persistent_journal", "subprocess",
+                  "load_config", "_run_systemctl", "_unit_is_active", "log")}
+        saved_argv = sys.argv[:]
+        saved_geteuid = _os.geteuid
+
+        restarted: List[Tuple[str, str]] = []
+        warnings: List[str] = []
+        detected_with_var_tmp = None
+        scan_calls = {"count": 0}
+
+        class FakeSubprocess:
+            @staticmethod
+            def run(cmd, **kwargs):
+                scan_calls["count"] += 1
+                return fake_run(cmd, **kwargs)
+            PIPE = mod.subprocess.PIPE
+            STDOUT = mod.subprocess.STDOUT
+            DEVNULL = mod.subprocess.DEVNULL
+
+        try:
+            mod.cmd_unmount = lambda: None
+            mod.cmd_mount = lambda: None
+            mod.check_and_create_lock = lambda name: None
+            mod.release_lock = lambda: None
+            mod.ensure_persistent_journal = lambda: None
+            mod.subprocess = FakeSubprocess
+            mod._unit_is_active = lambda name: True
+
+            def fake_systemctl(action, name):
+                restarted.append((action, name))
+                return True
+            mod._run_systemctl = fake_systemctl
+
+            def fake_log(msg, level="INFO"):
+                if level == "WARN":
+                    warnings.append(msg)
+            mod.log = fake_log
+
+            # Unit-test the scan directly while the fake systemctl is in place.
+            detected_with_var_tmp = mod.find_active_private_tmp_units()
+
+            # A path under /var/tmp is configured, no matching Services entry:
+            # main() must run the scan and only warn, never restart, about the
+            # unit it finds.
+            mod.load_config = lambda: {"paths": "/var/tmp = drop\n"}
+            mod.RECONFIGURE = False
+            _os.geteuid = lambda: 0
+            sys.argv = ["omv-writecache", "remount", "--reconfigure"]
+            mod.main()
+
+            scans_with_var_tmp = scan_calls["count"]
+            warned_when_unhandled = list(warnings)
+            restarted_when_unhandled = list(restarted)
+
+            # No /tmp or /var/tmp path configured: the scan must be skipped
+            # entirely so a settings change unrelated to PrivateTmp never
+            # spends time probing every running unit's PrivateTmp property.
+            mod.load_config = lambda: {"paths": "/var/log = drop\n"}
+            sys.argv = ["omv-writecache", "remount", "--reconfigure"]
+            mod.main()
+
+            scans_without_var_tmp = scan_calls["count"] - scans_with_var_tmp
+
+            # Admin has listed the affected unit in Services: main() must
+            # restart it (via restart_services, right after cmd_mount) and
+            # drop it from the warning -- it is handled now, not just flagged.
+            restarted.clear()
+            warnings.clear()
+            mod.load_config = lambda: {
+                "paths": "/var/tmp = drop\n",
+                "services": "has-private-tmp.service = restart\n",
+            }
+            sys.argv = ["omv-writecache", "remount", "--reconfigure"]
+            mod.main()
+
+            restarted_when_handled = list(restarted)
+            warned_when_handled = list(warnings)
+        except SystemExit:
+            pass
+        finally:
+            for k, v in saved.items():
+                setattr(mod, k, v)
+            sys.argv = saved_argv
+            _os.geteuid = saved_geteuid
+            mod.RECONFIGURE = False
+
+        ok = True
+
+        detected_ok = (set(detected_with_var_tmp or []) == private_tmp_units)
+        log_test(f"  find_active_private_tmp_units() returns only PrivateTmp=yes units: "
+                 f"{'OK' if detected_ok else 'FAIL'} ({detected_with_var_tmp})",
+                 "SUCCESS" if detected_ok else "FAIL")
+        ok &= detected_ok
+
+        never_restarted = (restarted_when_unhandled == [])
+        log_test(f"  remount never auto-restarts an unhandled unit: "
+                 f"{'OK' if never_restarted else 'FAIL'} ({restarted_when_unhandled})",
+                 "SUCCESS" if never_restarted else "FAIL")
+        ok &= never_restarted
+
+        warned_ok = any("has-private-tmp.service" in w for w in warned_when_unhandled)
+        log_test(f"  remount warns about an unhandled unit: "
+                 f"{'OK' if warned_ok else 'FAIL'} ({warned_when_unhandled})",
+                 "SUCCESS" if warned_ok else "FAIL")
+        ok &= warned_ok
+
+        scanned_when_relevant = scans_with_var_tmp > 0
+        log_test(f"  remount scans for PrivateTmp units when /var/tmp is managed: "
+                 f"{'OK' if scanned_when_relevant else 'FAIL'}",
+                 "SUCCESS" if scanned_when_relevant else "FAIL")
+        ok &= scanned_when_relevant
+
+        skipped_when_irrelevant = (scans_without_var_tmp == 0)
+        log_test(f"  remount skips the scan when no /tmp or /var/tmp path is managed: "
+                 f"{'OK' if skipped_when_irrelevant else 'FAIL'}",
+                 "SUCCESS" if skipped_when_irrelevant else "FAIL")
+        ok &= skipped_when_irrelevant
+
+        restarted_ok = ("restart", "has-private-tmp.service") in restarted_when_handled
+        log_test(f"  remount restarts a unit the admin listed in Services: "
+                 f"{'OK' if restarted_ok else 'FAIL'} ({restarted_when_handled})",
+                 "SUCCESS" if restarted_ok else "FAIL")
+        ok &= restarted_ok
+
+        not_warned_ok = not any("has-private-tmp.service" in w for w in warned_when_handled)
+        log_test(f"  remount does not warn about a unit the admin already handles: "
+                 f"{'OK' if not_warned_ok else 'FAIL'} ({warned_when_handled})",
+                 "SUCCESS" if not_warned_ok else "FAIL")
+        ok &= not_warned_ok
+
+        log_test("PrivateTmp detection: " + ("OK" if ok else "FAIL"),
                  "SUCCESS" if ok else "FAIL")
         return ok
 
@@ -2268,6 +2445,7 @@ class WriteCacheTest:
             "postfix_after_mount": False,
             "postfix_after_flush": False,
             "postfix_after_unmount": False,
+            "private_tmp_detection": False,
         }
 
         try:
@@ -2377,6 +2555,7 @@ class WriteCacheTest:
             results["services_running_only"] = self.test_services_only_touch_running_units()
             results["reconfigure_no_kill"] = self.test_reconfigure_unmount_no_kill()
             results["reconfigure_flag"] = self.test_reconfigure_flag_parsing()
+            results["private_tmp_detection"] = self.test_private_tmp_detection()
 
             # Create more files, then unmount
             log_test("\n>>> Prepare for unmount: create more files", "INFO")

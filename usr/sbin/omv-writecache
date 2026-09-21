@@ -22,7 +22,7 @@ try:
 except Exception:
     yaml = None
 
-SCRIPT_VERSION = "0.1.4"
+SCRIPT_VERSION = "0.1.5"
 CONFIG = Path("/etc/omv-writecache/config.yaml")
 
 # Workspace root for overlay metadata (lower binds, upperdirs, workdirs).
@@ -951,6 +951,48 @@ def restart_services(cfg, stopped=None):
         if entry.action in ("stopstart", "stopdailystart") and entry.name in stopped:
             _run_systemctl("start", entry.name)
 
+# Real paths under which systemd creates 'systemd-private-<boot>-<unit>-<rnd>'
+# backing directories for units with PrivateTmp=yes.
+PRIVATE_TMP_PATHS = {"/tmp", "/var/tmp"}
+
+def find_active_private_tmp_units():
+    """Return running service units with PrivateTmp=yes.
+
+    Each such unit keeps its private /tmp and /var/tmp bind-mounted from a
+    systemd-private-* directory that lives under the real /tmp and /var/tmp.
+    A remount that recreates the overlay backing one of those paths (e.g. a
+    'drop' policy wiping the upperdir) makes that directory vanish while the
+    unit's mount namespace still references it: the unit keeps running until
+    its next reload/start, which sets up a fresh private namespace and fails
+    with 226/NAMESPACE because the source directory is gone. The remount
+    command uses this to restart any such unit the admin has opted into via
+    the Services list, and to warn about the rest -- we never touch a unit
+    the admin hasn't explicitly listed.
+    """
+    try:
+        result = subprocess.run(
+            ["systemctl", "list-units", "--type=service", "--state=running",
+             "--no-legend", "--plain", "--no-pager"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+    except Exception as e:
+        log(f"PRIVATE_TMP_SCAN_ERROR: {e}", "WARN")
+        return []
+
+    units = [line.split()[0] for line in result.stdout.splitlines() if line.strip()]
+    stale = []
+    for unit in units:
+        try:
+            r = subprocess.run(
+                ["systemctl", "show", unit, "--property=PrivateTmp", "--value"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            )
+            if r.stdout.strip() == "yes":
+                stale.append(unit)
+        except Exception:
+            continue
+    return stale
+
 def sanitize_name(p):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", p.strip("/"))
 
@@ -1870,8 +1912,39 @@ def main():
     elif cmd == "rotateunmount":
         cmd_rotateunmount()
     elif cmd == "remount":
+        cfg = load_config()
+        reconfig_paths = {str(Path(e.path).resolve())
+                           for e in parse_paths(cfg.get("paths", "") or "")}
+        private_tmp_units = (find_active_private_tmp_units()
+                              if reconfig_paths & PRIVATE_TMP_PATHS else [])
+
+        # Same stop-before / restart-after wrapping cmd_flush() gives the
+        # Services list around a flush, now also around a settings-triggered
+        # remount. A unit listed with restart/reload/stopstart gets its mount
+        # namespace rebuilt against the new overlay right here, which is what
+        # actually prevents the 226/NAMESPACE failure below -- not just a log
+        # line the admin has to act on later.
+        stopped = stop_services(cfg)
         cmd_unmount()
         cmd_mount()
+        restart_services(cfg, stopped)
+
+        if private_tmp_units:
+            # Only warn about units the admin hasn't told WriteCache to
+            # handle above -- we never restart another service's unit on our
+            # own initiative. reloaddaily/restartdaily/stopdailystart entries
+            # don't fire here (no --daily on a remount), so they don't count
+            # as handling it either.
+            handled = {e.name for e in parse_services(cfg.get("services", "") or "")
+                       if e.action in ("restart", "reload", "stopstart")}
+            unhandled = sorted(u for u in private_tmp_units if u not in handled)
+            if unhandled:
+                log("PRIVATE_TMP_WARN: " + ", ".join(unhandled) +
+                    " have host-backed PrivateTmp dirs under a path just "
+                    "reconfigured; their NEXT 'systemctl reload/restart' may "
+                    "fail with 226/NAMESPACE unless restarted -- add "
+                    "'<unit> = restart' to the Services list to have "
+                    "WriteCache handle this automatically", "WARN")
     elif cmd == "status":
         cmd_status()
     elif cmd == "df":
