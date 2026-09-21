@@ -30,10 +30,13 @@
 {% set workspace_type = (('zram' if ram_backing == 'zram' else 'tmpfs') if use_tmpfs else 'path') %}
 {% set workspace_root = '' if use_tmpfs else salt['omv_conf.get_sharedfolder_path'](config.sharedfolderref) %}
 
-{% set shutdown_action = None %}
-{% if config.flush_on_shutdown | to_bool %}
-{%   set shutdown_action = 'rotateunmount' if (config.rotate_on_shutdown | to_bool) else 'unmount' %}
-{% endif %}
+{# cmd_unmount() already checks flush_on_shutdown itself to decide whether to
+   flush before tearing overlays down, so ExecStop must always resolve to a
+   valid 'unmount'/'rotateunmount' command -- gating it here on
+   flush_on_shutdown left shutdown_action as Jinja's None, which rendered as
+   the literal (invalid) command "None" and made ExecStop fail on every
+   stop/reboot whenever flush-on-shutdown was disabled. #}
+{% set shutdown_action = 'rotateunmount' if (config.rotate_on_shutdown | to_bool) else 'unmount' %}
 
 {% set flush_hourly = config.flush_hourly | to_bool %}
 

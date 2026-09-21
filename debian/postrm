@@ -8,6 +8,7 @@ set -e
 remove_action() {
   dpkg-trigger update-workbench
   rm -rf /etc/omv-writecache
+  rm -f /etc/cron.d/omv-writecache
 
   conf="/etc/systemd/journald.conf.d/50-writecache.conf"
   if [ -e "${conf}" ]; then
@@ -15,6 +16,9 @@ remove_action() {
     systemctl reload systemd-journald 2>/dev/null || systemctl try-restart systemd-journald || true
   fi
 
+  # Services are already stopped and disabled by prerm, before dpkg removed
+  # /usr/sbin/omv-writecache (which the unit's ExecStop depends on). Just
+  # delete the leftover unit files here.
   units=(
     "omv-writecache-setup.service"
     "omv-writecache-teardown.service"
@@ -22,10 +26,7 @@ remove_action() {
     "omv-writecache-flush.timer"
   )
   for u in "${units[@]}"; do
-    if [ -f "/etc/systemd/system/${u}" ]; then
-      systemctl disable --now "${u}" >/dev/null 2>&1 || true
-      rm -f "/etc/systemd/system/${u}" 2>/dev/null || true
-    fi
+    rm -f "/etc/systemd/system/${u}" 2>/dev/null || true
   done
 
   systemctl daemon-reload || true

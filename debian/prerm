@@ -1,0 +1,43 @@
+#!/bin/bash
+
+set -e
+
+. /etc/default/openmediavault
+. /usr/share/openmediavault/scripts/helper-functions
+
+stop_action() {
+  # Flush pending writes and unmount overlays directly while the script is
+  # still on disk. dpkg removes /usr/sbin/omv-writecache before postrm runs,
+  # so relying on the unit's ExecStop (which shells back out to this same
+  # script) to do this from postrm no longer works -- it has to happen here,
+  # in prerm, before dpkg removes the package's files.
+  if [ -x /usr/sbin/omv-writecache ]; then
+    /usr/sbin/omv-writecache unmount >/dev/null 2>&1 || true
+  fi
+
+  units=(
+    "omv-writecache-setup.service"
+    "omv-writecache-teardown.service"
+    "omv-writecache-flush.service"
+    "omv-writecache-flush.timer"
+  )
+  for u in "${units[@]}"; do
+    systemctl disable --now "${u}" >/dev/null 2>&1 || true
+  done
+}
+
+case "$1" in
+  remove|purge)
+    stop_action
+  ;;
+
+  upgrade|failed-upgrade|deconfigure)
+  ;;
+
+  *)
+    echo "prerm called with unknown argument '$1'" >&2
+    exit 1
+  ;;
+esac
+
+exit 0
