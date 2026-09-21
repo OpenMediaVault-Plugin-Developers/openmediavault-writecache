@@ -44,7 +44,20 @@ DEFAULTS_FILE = "/etc/default/omv-writecache"
 # holders there never lets a plain umount win -- it only SIGKILLs journald plus
 # every other process with an fd on that filesystem, twice, before falling back
 # to the lazy unmount anyway. For these, skip the kill and go straight to lazy.
-LAZY_UNMOUNT_PATHS = {"/var/log"}
+#
+# /var/cache/apt/archives, /var/lib/apt/lists and /var/lib/dpkg/updates get the
+# same treatment for a sharper reason: 'unmount' is invoked directly from this
+# package's own prerm during an apt/dpkg removal, and apt/dpkg always holds
+# these paths open for the very transaction that is running. A plain umount
+# failing EBUSY there and escalating to 'fuser -km' SIGKILLs apt/dpkg itself,
+# aborting the transaction mid-purge (observed: fuser -km killed the PID of the
+# 'apt-get purge' invocation that triggered this script in the first place).
+LAZY_UNMOUNT_PATHS = {
+    "/var/log",
+    "/var/cache/apt/archives",
+    "/var/lib/apt/lists",
+    "/var/lib/dpkg/updates",
+}
 
 def get_log_file():
     log_file = DEFAULT_LOG_FILE

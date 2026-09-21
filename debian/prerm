@@ -6,15 +6,16 @@ set -e
 . /usr/share/openmediavault/scripts/helper-functions
 
 stop_action() {
-  # Flush pending writes and unmount overlays directly while the script is
-  # still on disk. dpkg removes /usr/sbin/omv-writecache before postrm runs,
-  # so relying on the unit's ExecStop (which shells back out to this same
-  # script) to do this from postrm no longer works -- it has to happen here,
-  # in prerm, before dpkg removes the package's files.
-  if [ -x /usr/sbin/omv-writecache ]; then
-    /usr/sbin/omv-writecache unmount >/dev/null 2>&1 || true
-  fi
-
+  # Stopping omv-writecache-setup.service runs its ExecStop
+  # (/usr/sbin/omv-writecache rotateunmount), which flushes pending writes and
+  # unmounts the overlays. That has to happen here, in prerm, while
+  # /usr/sbin/omv-writecache is still on disk -- dpkg removes it before postrm
+  # runs, so stopping the unit from postrm can no longer run ExecStop.
+  #
+  # Do NOT also call `omv-writecache unmount` directly here: that duplicates
+  # the exact teardown ExecStop is about to perform, and doing it twice back
+  # to back has caused the second pass's unmount of /var/cache/apt/archives
+  # to fuser-kill the very apt/dpkg process running this purge.
   units=(
     "omv-writecache-setup.service"
     "omv-writecache-teardown.service"
