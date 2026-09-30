@@ -1267,6 +1267,46 @@ def clear_overlay_opq_and_whiteouts(upper_dir: Path) -> int:
         pass
     return removed
 
+def quarantine_stale_upper(target: Path, upper: Path, lower: Path) -> int:
+    """Move cached copies that are older than the file on disk out of 'upper'.
+
+    Call only for an upper no mounted overlay is using. While an overlay is up,
+    the real directory is hidden and only changes through a flush, so pending
+    cached files are never older than their disk copy. An older one means the
+    disk changed while this upper sat unused -- typically a persistent (path)
+    workspace left with pending data, then the backing switched to RAM and
+    back. Flushing or overlaying it would roll the newer file back. Entries are
+    moved (never deleted) to <workspace>/<name>/stale/<timestamp>/ for review.
+    Covers files, symlinks and whiteouts (a deletion older than the disk file).
+    """
+    moved = 0
+    stale_root = upper.parent / "stale" / time.strftime("%Y%m%d-%H%M%S")
+    for root, dirs, files in os.walk(upper):
+        names = files + [d for d in dirs if os.path.islink(os.path.join(root, d))]
+        for f in names:
+            up = os.path.join(root, f)
+            rel = os.path.relpath(up, upper)
+            try:
+                u_mtime = os.lstat(up).st_mtime_ns
+                l_mtime = os.lstat(os.path.join(lower, rel)).st_mtime_ns
+            except FileNotFoundError:
+                continue  # new file, or already gone from disk: nothing to compare
+            except Exception as e:
+                log(f"STALE_CHECK_WARN: {up} - {e}", "WARN")
+                continue
+            if u_mtime >= l_mtime:
+                continue
+            dest = stale_root / rel
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                os.rename(up, dest)
+                moved += 1
+                log(f"STALE_UPPER_QUARANTINED: {target / rel} -> {dest} "
+                    f"(cached copy older than the file on disk)", "WARN")
+            except Exception as e:
+                log(f"STALE_QUARANTINE_FAILED: {up} - {e}", "ERROR")
+    return moved
+
 def upper_has_content(upper_dir: Path) -> bool:
     """True if upper_dir contains any entries (including .wh.* markers)."""
     try:
@@ -1305,6 +1345,7 @@ def flush_pending_on_boot(cfg: dict, workspace_root: Path):
             lower = lower_bind_for(workspace_root, name)
             if not is_mountpoint(lower):
                 lower = ensure_lower_bind(workspace_root, p, name)
+            quarantine_stale_upper(p, upper, lower)
 
             ok = False
             try:
@@ -1397,6 +1438,7 @@ def mount_overlays(cfg):
         if is_overlay_mounted(lower):
             log(f"FIXUP: overlay was mounted on lower bind {lower}; unmounting", "ERROR")
             force_unmount_with_retry(lower)
+        quarantine_stale_upper(p, upper, lower)
         opts = f"lowerdir={lower},upperdir={upper},workdir={work},metacopy=off,redirect_dir=off,index=off"
         log(f"OVERLAY_MOUNT: {p} policy={mode} lowerdir={lower}")
         res = run(["mount", "-t", "overlay", "overlay", "-o", opts, str(p)], check=False)
@@ -1671,8 +1713,13 @@ def flush(cfg, teardown: bool = False):
     log("FLUSH_START: Beginning flush operation")
     ws_root = get_workspace_root(cfg)
     if not is_workspace_ready(cfg):
-        log(f"WORKSPACE_NOT_READY: {ws_root} (cannot flush)", "ERROR")
-        return False
+        if not teardown:
+            log(f"WORKSPACE_NOT_READY: {ws_root} (cannot flush)", "ERROR")
+            return False
+        # Expected before a teardown, e.g. a settings change after the RPC has
+        # already unmounted the old workspace. Only live overlays can hold
+        # pending data then, and _flush_path follows their own directories.
+        log(f"FLUSH_WORKSPACE_ABSENT: {ws_root} not mounted; flushing live overlays only")
     errors = 0
     for entry in parse_paths(cfg.get("paths", "")) + orphan_entries(cfg):
         if entry.mode not in FLUSH_MODES:
@@ -1755,6 +1802,11 @@ def _flush_path(entry, ws_root: Path, teardown: bool) -> int:
         info = findmnt_info(lower)
         log(f"LOWER_BIND_UNSAFE: refusing to flush {p} -> {lower} (source={info.get('source')} fstype={info.get('fstype')})", "ERROR")
         return 1
+
+    if not live:
+        # No overlay was using this upper, so it may be left over from an
+        # earlier session and older than what is now on disk.
+        quarantine_stale_upper(p, upper, lower)
 
     ok = False
     try:

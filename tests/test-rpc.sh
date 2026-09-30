@@ -337,6 +337,8 @@ run_step() {
     echo "$marker" >> "$SENTINEL"
     MARKERS+=("$marker")
 
+    local cfg_before; cfg_before="$(md5sum "$CONFIG_YAML" 2>/dev/null)"
+
     # 1) setSettings via RPC (runs 'unmount --reconfigure' on a backing change)
     local params
     if [ -n "$override" ]; then
@@ -480,11 +482,18 @@ run_step() {
         fi
         # One remount applies the change; salt must not also restart the
         # service (ExecStop + ExecStart), which repeated the whole teardown/setup.
-        local n_remount n_restart
+        # Unchanged settings leave config.yaml as it was, so salt rightly
+        # skips the remount too.
+        local n_remount n_restart want_remount=1
+        [ "$(md5sum "$CONFIG_YAML" 2>/dev/null)" = "$cfg_before" ] && want_remount=0
         n_remount="$(grep -c 'SCRIPT_START: omv-writecache remount --reconfigure' "$slice")"
         n_restart="$(grep -cE 'SCRIPT_START: omv-writecache (rotateunmount|unmount|mount)$' "$slice")"
-        if [ "$n_remount" -eq 1 ] && [ "$n_restart" -eq 0 ]; then
-            _pass "applied with a single remount, no service restart"
+        if [ "$n_remount" -eq "$want_remount" ] && [ "$n_restart" -eq 0 ]; then
+            if [ "$want_remount" -eq 1 ]; then
+                _pass "applied with a single remount, no service restart"
+            else
+                _pass "config unchanged: no remount, no service restart"
+            fi
         else
             _fail "applied with a single remount, no service restart (step $n)" \
                 "remounts=$n_remount, service stop/start runs=$n_restart"

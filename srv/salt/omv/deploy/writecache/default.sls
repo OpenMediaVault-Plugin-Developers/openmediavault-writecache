@@ -217,14 +217,17 @@ writecache_systemctl_daemon_reload:
 
 {% if enabled %}
 
+{# No 'watch' on the unit file: restarting the service on a unit change ran
+   the whole teardown (ExecStop) and setup (ExecStart) and then the remount
+   below repeated it. The daemon-reload above picks up the new unit (including
+   ExecStop) for the running service, and the remount applies the change. #}
 writecache_setup_service_enable:
   service.running:
     - name: omv-writecache-setup.service
     - enable: True
     - require:
       - file: omv-writecache-setup_service
-    - watch:
-      - file: omv-writecache-setup_service
+      - module: writecache_systemctl_daemon_reload
 
 writecache_reconfigure_overlays:
   cmd.run:
