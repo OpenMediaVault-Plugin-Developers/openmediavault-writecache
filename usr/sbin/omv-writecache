@@ -11,6 +11,7 @@ import stat
 import pwd, grp
 import atexit, signal
 import fcntl
+import contextlib
 from pathlib import Path
 from collections import namedtuple
 
@@ -165,10 +166,33 @@ def release_lock():
     except Exception as e:
         log(f"Lock release error: {e}", "WARN")
 
+_DEFER_SIGNALS = 0
+_PENDING_SIGNAL = None
+
 def handle_signal(signum, frame):
     # Handle termination signals to release the lock properly
+    global _PENDING_SIGNAL
+    if _DEFER_SIGNALS:
+        # Exiting now could leave a path unmounted with its pending writes hidden
+        # in the upper; signals_deferred() exits once the path is consistent.
+        _PENDING_SIGNAL = signum
+        log(f"SIGNAL_DEFERRED: {signum} (finishing current path first)", "WARN")
+        return
     print(f"Received signal {signum}, cleaning up...")
     sys.exit(1)
+
+@contextlib.contextmanager
+def signals_deferred():
+    """Postpone SIGINT/SIGTERM handling until the wrapped block completes."""
+    global _DEFER_SIGNALS
+    _DEFER_SIGNALS += 1
+    try:
+        yield
+    finally:
+        _DEFER_SIGNALS -= 1
+    if not _DEFER_SIGNALS and _PENDING_SIGNAL is not None:
+        log(f"SIGNAL_EXIT: acting on deferred signal {_PENDING_SIGNAL}", "WARN")
+        sys.exit(1)
 
 
 def get_workspace_type(cfg: dict) -> str:
@@ -182,6 +206,10 @@ def get_workspace_root(cfg: dict) -> Path:
 def lower_bind_for(workspace_root: Path, name: str) -> Path:
     return workspace_root / name / "lower"
 
+def _unescape_mount_field(s: str) -> str:
+    # /proc/mounts octal-escapes space, tab, newline and backslash (e.g. '\040').
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), s)
+
 def get_mounts() -> list[dict]:
     mounts = []
     try:
@@ -189,7 +217,10 @@ def get_mounts() -> list[dict]:
             for line in f:
                 parts = line.split()
                 if len(parts) >= 4:
-                    mounts.append({"device": parts[0], "path": parts[1], "fstype": parts[2], "opts": parts[3]})
+                    mounts.append({"device": _unescape_mount_field(parts[0]),
+                                   "path": _unescape_mount_field(parts[1]),
+                                   "fstype": parts[2],
+                                   "opts": parts[3]})
     except Exception as e:
         log(f"Failed to read /proc/mounts: {e}", "WARN")
     return mounts
@@ -533,7 +564,10 @@ def ensure_workspace(cfg: dict) -> Path:
             raise SystemExit(1)
 
         run(["mkfs.ext4", "-F", "-q", "-m", "0", "-O", "^has_journal", dev], check=False)
-        run(["mount", "-o", "noatime,nosuid,nodev,discard", dev, str(ws_root)])
+        if run(["mount", "-o", "noatime,nosuid,nodev,discard", dev, str(ws_root)], check=False).returncode != 0:
+            log(f"ZRAM_MOUNT_FAILED: {dev} -> {ws_root}", "ERROR")
+            free_zram_device(dev)
+            raise SystemExit(1)
         try:
             os.chmod(str(ws_root), 0o755)
         except Exception as e:
@@ -632,11 +666,17 @@ def force_unmount_with_retry(path: Path, max_retries: int = 3, allow_kill: bool 
     return False
 
 def mounts_under(prefix: Path) -> list[Path]:
+    """Mountpoints strictly below 'prefix' (never 'prefix' itself).
+
+    The workspace root is excluded on purpose: a RAM workspace is torn down
+    separately (after its zram device is captured), and a 'path' workspace root
+    may be a real data disk that must never be unmounted.
+    """
     prefix_str = str(prefix).rstrip("/") + "/"
     pts = []
     for m in get_mounts():
         mp = m["path"]
-        if mp == str(prefix) or mp.startswith(prefix_str):
+        if mp.startswith(prefix_str):
             pts.append(Path(mp))
     # deepest-first so children go away before parents
     return sorted(pts, key=lambda p: len(str(p)), reverse=True)
@@ -812,6 +852,10 @@ def parse_owner_mode(attr_str):
     return uid, gid, perms
 
 
+# Policies that write the cached changes back to disk.
+FLUSH_MODES = ("flush", "persist", "writeback")
+VALID_MODES = ("drop",) + FLUSH_MODES
+
 def parse_paths(paths_text):
     """Parse the paths config block into a list of PathEntry namedtuples.
 
@@ -835,8 +879,15 @@ def parse_paths(paths_text):
             eq_idx = tokens.index("=")
             p = " ".join(tokens[:eq_idx])
             rest = tokens[eq_idx + 1:]
-            mode = rest[0] if rest else "drop"
+            mode = rest[0].lower() if rest else "drop"
             uid, gid, perms = parse_owner_mode(" ".join(rest[1:]))
+            if mode not in VALID_MODES:
+                # Never guess: treating a typo'd 'flush' as drop would silently
+                # discard its writes. Leave the path uncached instead, so writes
+                # go straight to disk until the entry is corrected.
+                log(f"PARSE_PATH_ERROR: unknown policy '{rest[0]}' for '{p}' "
+                    f"(expected {', '.join(VALID_MODES)}); path not cached", "ERROR")
+                continue
         else:
             # No policy separator — strip any trailing owner=/mode= tokens
             # (identifiable by containing '=') from the right so that paths
@@ -1060,19 +1111,79 @@ def live_overlay_dirs(path: Path):
     for m in get_mounts():
         if m["path"] != target or m["fstype"] != "overlay":
             continue
-        d = {}
-        for kv in m["opts"].split(","):
-            if kv.startswith("lowerdir="):
-                d["lower"] = kv[len("lowerdir="):]
-            elif kv.startswith("upperdir="):
-                d["upper"] = kv[len("upperdir="):]
-            elif kv.startswith("workdir="):
-                d["work"] = kv[len("workdir="):]
-        # Only handle the single-lower layout this tool creates; a colon-separated
-        # lowerdir is not something we manage, so fall back to config-derived paths.
-        if all(k in d for k in ("lower", "upper", "work")) and ":" not in d["lower"]:
+        d = _overlay_dirs(m)
+        if d:
             return d
     return None
+
+def _overlay_dirs(m: dict):
+    """Parse lower/upper/work from an overlay mount entry, or None."""
+    d = {}
+    for kv in m["opts"].split(","):
+        kv = _unescape_mount_field(kv)
+        if kv.startswith("lowerdir="):
+            d["lower"] = kv[len("lowerdir="):]
+        elif kv.startswith("upperdir="):
+            d["upper"] = kv[len("upperdir="):]
+        elif kv.startswith("workdir="):
+            d["work"] = kv[len("workdir="):]
+    # Only handle the single-lower layout this tool creates; a colon-separated
+    # lowerdir is not something we manage, so fall back to config-derived paths.
+    if all(k in d for k in ("lower", "upper", "work")) and ":" not in d["lower"]:
+        return d
+    return None
+
+POLICY_FILE = "policy"
+
+def write_policy_marker(ws_root: Path, name: str, mode: str):
+    """Record the policy an overlay was mounted with, next to its upper/work.
+
+    If the path is later removed from the config while its overlay is live, this
+    is the only record of whether its pending writes must be flushed or dropped.
+    """
+    try:
+        (ws_root / name / POLICY_FILE).write_text(mode + "\n")
+    except Exception as e:
+        log(f"POLICY_MARKER_WARN: {ws_root / name} - {e}", "WARN")
+
+def orphan_entries(cfg: dict) -> list:
+    """Live overlays created by this tool whose path is no longer in the config.
+
+    A path removed from the Paths list keeps its overlay mounted until something
+    tears it down, but flush()/unmount() only iterate the configured paths. They
+    use these entries too, so a removed 'flush' path is written back and every
+    removed path is unmounted instead of pinning a lazily-detached workspace.
+
+    Ours are recognised by the <dir>/{lower,upper,work} layout plus either <dir>
+    being under the configured workspace or carrying a policy marker (a workspace
+    root changed since mounting). The policy comes from that marker; overlays
+    mounted before markers existed get 'unknown' and are never flushed.
+    """
+    ws_root = get_workspace_root(cfg)
+    configured = {str(Path(e.path).resolve()) for e in parse_paths(cfg.get("paths", "") or "")}
+    res = []
+    seen = set()
+    for m in get_mounts():
+        if m["fstype"] != "overlay" or m["path"] in configured or m["path"] in seen:
+            continue
+        d = _overlay_dirs(m)
+        if not d:
+            continue
+        base = Path(d["upper"]).parent
+        if (Path(d["upper"]).name != "upper" or Path(d["lower"]) != base / "lower"
+                or Path(d["work"]) != base / "work"):
+            continue
+        marker = base / POLICY_FILE
+        if not (base.parent == ws_root or marker.exists()):
+            continue
+        try:
+            mode = marker.read_text().strip() or "unknown"
+        except Exception:
+            mode = "unknown"
+        log(f"ORPHAN_OVERLAY: {m['path']} (no longer configured) policy={mode}", "WARN")
+        res.append(PathEntry(m["path"], mode, None, None, None))
+        seen.add(m["path"])
+    return res
 
 def is_overlayfs_whiteout(p: Path) -> bool:
     """
@@ -1179,7 +1290,7 @@ def flush_pending_on_boot(cfg: dict, workspace_root: Path):
     for entry in parse_paths(cfg.get("paths", "")):
         path, mode = entry.path, entry.mode
         # Only flush modes that are intended to write back.
-        if mode not in ("flush", "persist", "writeback"):
+        if mode not in FLUSH_MODES:
             continue
         p = Path(path).resolve()
         name = sanitize_name(str(p))
@@ -1273,6 +1384,7 @@ def mount_overlays(cfg):
         upper.mkdir(parents=True, exist_ok=True)
         work.mkdir(parents=True, exist_ok=True)
         sync_upper_attrs(upper, p, entry.uid, entry.gid, entry.perms)
+        write_policy_marker(ws_root, name, mode)
         changed, bad = scrub_bad_specials(upper)
         if changed:
             log(f"SCRUBBED_BAD_SPECIALS: {len(bad)} removed under {upper}")
@@ -1293,28 +1405,61 @@ def mount_overlays(cfg):
         else:
             log(f"MOUNT_FAILED: {p}", "ERROR")
 
-def apply_whiteouts(upper_dir, lower_dir):
+def is_opaque_dir(path: str, files) -> bool:
+    """True if upper directory 'path' is opaque (hides everything below it in lower).
+
+    Kernel overlayfs marks this with the trusted.overlay.opaque="y" xattr, set
+    e.g. by 'rm -rf d; mkdir d'. The '.wh..wh..opq' marker file is the aufs
+    convention and is only kept for compatibility.
     """
-    Apply overlayfs whiteouts from upper -> lower.
-    - .wh.<name> deletes <name> in lower
-    - .wh..wh..opq makes directory opaque: remove lower entries not present in upper
-    - char device (0,0) entries are also overlayfs whiteouts on many systems
+    if ".wh..wh..opq" in files:
+        return True
+    try:
+        return os.getxattr(path, "trusted.overlay.opaque", follow_symlinks=False) == b"y"
+    except OSError:
+        return False
+
+def apply_whiteouts(upper_dir, lower_dir) -> bool:
+    """
+    Apply overlayfs whiteouts from upper -> lower. Returns False if any could not
+    be applied, so the caller keeps the upper for a retry instead of letting the
+    deleted entries reappear.
+    - char device (0,0) entries are overlayfs whiteouts: delete <name> in lower
+    - opaque directories (trusted.overlay.opaque xattr, or .wh..wh..opq): remove
+      lower entries not present in upper
+    - .wh.<name> (aufs-style) deletes <name> in lower
     """
     upper_dir = os.path.abspath(upper_dir)
     lower_dir = os.path.abspath(lower_dir)
     log(f"Applying whiteouts from {upper_dir} to {lower_dir}")
+    ok = True
 
     for root, dirs, files in os.walk(upper_dir, topdown=True):
         rel = os.path.relpath(root, upper_dir)
         lower_root = os.path.join(lower_dir, rel) if rel != "." else lower_dir
 
-        # Opaque marker handling
-        if ".wh..wh..opq" in files:
+        # 'root' is a real directory in upper. If lower has a symlink or file by
+        # that name, the upper directory replaced it: remove it now, so nothing
+        # below follows a lower symlink out of the managed tree.
+        if rel != "." and (os.path.islink(lower_root)
+                           or (os.path.lexists(lower_root) and not os.path.isdir(lower_root))):
+            try:
+                os.remove(lower_root)
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                ok = False
+                log(f"Replace of lower non-directory failed at {lower_root}: {e}", "ERROR")
+                continue
+
+        # Opaque directory handling
+        if is_opaque_dir(root, files):
             try:
                 os.makedirs(lower_root, exist_ok=True)
                 # live names present in upper at this level (excluding whiteouts)
                 upper_live = set(n for n in (files + dirs)
-                                 if not n.startswith(".wh.") and n != ".wh..wh..opq")
+                                 if not n.startswith(".wh.")
+                                 and not is_overlayfs_whiteout(Path(root) / n))
                 try:
                     lower_entries = os.listdir(lower_root)
                 except FileNotFoundError:
@@ -1331,7 +1476,8 @@ def apply_whiteouts(upper_dir, lower_dir):
                                 pass
                 log(f"Applied opaque whiteout at {lower_root}")
             except Exception as e:
-                log(f"Opaque cleanup failed at {lower_root}: {e}")
+                ok = False
+                log(f"Opaque cleanup failed at {lower_root}: {e}", "ERROR")
 
         # Regular whiteouts
         for f in files:
@@ -1362,13 +1508,17 @@ def apply_whiteouts(upper_dir, lower_dir):
                         pass
                 log(f"Applied chrdev whiteout for {target}")
 
+    return ok
+
 def rsync_upper_to_lower(upper_dir, lower_dir, enforce_uid=None, enforce_gid=None, enforce_mode=None):
     """
     Sync overlayfs upper -> lower.
     - Apply whiteouts before rsync.
     - Preserve perms, times, ACLs, hardlinks (no xattrs).
     - Avoid specials/devices so we don't mknod transient files.
-    - Treat rsync 23/24 as non-fatal (vanished files etc.).
+    - Treat rsync 24 (source files vanished) as non-fatal. 23 (some files could
+      not be transferred) is a failure: the upper holds the only copy of those
+      files, so it must be preserved for a retry, not cleared.
     - Report number of files transferred, and rsync's literal/matched bytes.
 
     If enforce_uid/enforce_gid/enforce_mode are given they are applied to
@@ -1389,7 +1539,7 @@ def rsync_upper_to_lower(upper_dir, lower_dir, enforce_uid=None, enforce_gid=Non
     lower_root_stat = os.stat(lower_dir)
 
     log(f"RSYNC: {upper_dir} -> {lower_dir}", "DEBUG")
-    apply_whiteouts(upper_dir, lower_dir)
+    whiteouts_ok = apply_whiteouts(upper_dir, lower_dir)
 
     args = [
         "rsync", "-aHA", "--inplace",
@@ -1455,12 +1605,15 @@ def rsync_upper_to_lower(upper_dir, lower_dir, enforce_uid=None, enforce_gid=Non
     except Exception as e:
         log(f"RSYNC_ROOT_ATTR_RESTORE_FAILED: {lower_dir} - {e}", "WARN")
 
+    if not whiteouts_ok:
+        log(f"WHITEOUTS_FAILED: {upper_dir} -> {lower_dir} (deletions not fully applied)", "ERROR")
+        return False
     if proc.returncode == 0:
         log(f"RSYNC_OK: {upper_dir} -> {lower_dir}", "DEBUG")
         return True
-    if proc.returncode in (23, 24):
-        # Partial/vanished files — OK for log dirs and ephemeral paths
-        log(f"RSYNC_WARN({proc.returncode}): {upper_dir} -> {lower_dir} (partial/vanished files)", "WARN")
+    if proc.returncode == 24:
+        # Source files vanished mid-transfer; everything still present was copied.
+        log(f"RSYNC_WARN(24): {upper_dir} -> {lower_dir} (vanished files)", "WARN")
         return True
     log(f"RSYNC_FAILED: exit {proc.returncode} ({output.strip()})", "ERROR")
     return False
@@ -1482,167 +1635,213 @@ def clear_upper_dir(upper_dir: str):
         except Exception as e:
             log(f"CLEAR_UPPER_WARN: failed to remove {p}: {e}", "WARN")
 
-def flush(cfg):
+# Paths whose writer holds a lock for the whole of a transaction. A routine
+# flush skips such a path while any of its locks is held, keeping the upper for
+# the next flush: lazily detaching /var/lib/dpkg/updates under a running dpkg
+# would lose its journal writes. A teardown flush still runs, since the
+# workspace is about to go away regardless.
+BUSY_LOCKS = {
+    "/var/lib/dpkg/updates": ("/var/lib/dpkg/lock-frontend", "/var/lib/dpkg/lock"),
+}
+
+def lock_is_held(lock_path: str) -> bool:
+    """True if another process holds a POSIX (fcntl) lock on lock_path."""
+    try:
+        fd = os.open(lock_path, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.lockf(fd, fcntl.LOCK_UN)
+        return False
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
+
+def flush(cfg, teardown: bool = False):
+    """Write pending changes of every flush-policy overlay back to disk.
+
+    teardown=True is used right before unmount(): a successfully flushed overlay
+    is left unmounted instead of being remounted only to be torn down again
+    (anything written in between would land in an upper about to be discarded),
+    and BUSY_LOCKS are ignored. A path whose flush failed is always remounted so
+    its preserved upper stays visible.
+    """
     log("FLUSH_START: Beginning flush operation")
     ws_root = get_workspace_root(cfg)
     if not is_workspace_ready(cfg):
         log(f"WORKSPACE_NOT_READY: {ws_root} (cannot flush)", "ERROR")
         return False
     errors = 0
-    for entry in parse_paths(cfg.get("paths", "")):
-        path, mode = entry.path, entry.mode
-        if mode not in ("flush", "persist", "writeback"):
-            log(f"SKIP_MODE: {path} mode={mode}", "DEBUG")
+    for entry in parse_paths(cfg.get("paths", "")) + orphan_entries(cfg):
+        if entry.mode not in FLUSH_MODES:
+            log(f"SKIP_MODE: {entry.path} mode={entry.mode}", "DEBUG")
             continue
-
-        p = Path(path).resolve()
-        name = sanitize_name(str(p))
-
-        # Prefer the directories of the overlay CURRENTLY mounted at 'p'. The
-        # configured workspace_root can drift after overlays are mounted (e.g. the
-        # workspace type/root is changed in the UI while overlays are live). Flushing
-        # the live overlay's own upper/lower/work avoids operating on the wrong
-        # (usually empty) workspace and silently discarding cached data.
-        live = live_overlay_dirs(p)
-        if live:
-            lower = Path(live["lower"])
-            upper = Path(live["upper"])
-            work = Path(live["work"])
-            if upper.parent != (ws_root / name):
-                log(f"WORKSPACE_DRIFT: {p} live workspace={upper.parent} configured={ws_root / name}; using live", "WARN")
-        else:
-            upper = ws_root / name / "upper"
-            work = ws_root / name / "work"
-            lower = lower_bind_for(ws_root, name)
-
-        if not upper.exists():
-            log(f"NO_UPPER: {p}", "DEBUG")
-            continue
-
-        # 1) Unmount overlay FIRST so that 'p' resolves to the real filesystem and so
-        #    that (re)binding the lower below cannot accidentally capture our own
-        #    overlay (which would make the lower bind 'overlay'-sourced and unsafe).
-        if is_overlay_mounted(p):
-            log(f"PRE-FLUSH_UNMOUNT: {p}")
-            # allow_kill=False: never SIGKILL the daemon that owns this data just
-            # to force the unmount. A clean 'stopstart' services entry is the way
-            # to make a busy flush target idle; absent that, the lazy detach
-            # fallback is still far safer than a torn database + stale pidfile.
-            if not force_unmount_with_retry(p, allow_kill=False):
-                log(f"PRE-FLUSH_UNMOUNT_FAILED: {p}", "ERROR")
-                errors += 1
-                continue
-
-        # 2) If the lower bind exists but is "poisoned" (overlay), tear it down so it
-        #    can be rebound from the now-real path.
-        if is_mountpoint(lower) and not lower_bind_is_safe(lower):
-            info = findmnt_info(lower)
-            log(f"LOWER_BIND_BAD: {lower} source={info.get('source')} fstype={info.get('fstype')} - recreating", "ERROR")
-            force_unmount_with_retry(lower)
-
-        # 3) Bind the lower from the (now overlay-free) real path if it is missing.
-        if not is_mountpoint(lower):
-            lower.mkdir(parents=True, exist_ok=True)
-            res = run(["mount", "--bind", str(p), str(lower)], check=False)
-            if res.returncode != 0 or not is_mountpoint(lower):
-                log(f"LOWER_BIND_FAILED: {p} -> {lower}", "ERROR")
-                errors += 1
-                continue
-            run(["mount", "--make-private", str(lower)], check=False)
-            remount_lower(lower, rw=False, check=False)
-
-        # Final safety check: refuse to flush if lower is not a real mount.
-        if not lower_bind_is_safe(lower):
-            info = findmnt_info(lower)
-            log(f"LOWER_BIND_UNSAFE: refusing to flush {p} -> {lower} (source={info.get('source')} fstype={info.get('fstype')})", "ERROR")
-            errors += 1
-            continue
-
-        ok = False
-        try:
-            # RW for rsync. If the lower cannot be made writable, rsync would fail
-            # for every single file; skip the transfer instead of running it against
-            # a read-only target. ok stays False so the upper is preserved below.
-            if not remount_lower(lower, rw=True):
-                log(f"LOWER_RW_FAILED: {lower} - skipping flush of {p}", "ERROR")
-            else:
-                # scrub before syncing (whiteouts/opaque markers)
-                changed, bad = scrub_bad_specials(upper)
-                if changed:
-                    log(f"SCRUBBED_UPPER: specials={len(bad)} under {upper}")
-
-                # actual flush
-                ok = rsync_upper_to_lower(str(upper), str(lower),
-                                          enforce_uid=entry.uid,
-                                          enforce_gid=entry.gid,
-                                          enforce_mode=entry.perms)
-
-        except Exception as e:
-            errors += 1
-            log(f"FLUSH_ERROR: {p} - {e}", "ERROR")
-        finally:
-            # ALWAYS go back to RO
-            try:
-                remount_lower(lower, rw=False)
-            except Exception as e2:
-                errors += 1
-                log(f"LOWER_RO_RESTORE_FAILED: {lower} - {e2}", "ERROR")
-
-        if ok:
-            # post-sync cleanup of upper
-            try:
-                try:
-                    clear_overlay_opq_and_whiteouts(upper)
-                except Exception:
-                    pass
-                clear_upper_dir(str(upper))
-                log(f"FLUSHED: {p}")
-            except Exception as e:
-                errors += 1
-                log(f"CLEAR_UPPER_FAILED: {upper} - {e}", "ERROR")
-        else:
-            errors += 1
-            log(f"FLUSH_FAILED: {p} - upper preserved for retry", "ERROR")
-
-        # Recreate the upper ONLY after a successful flush. When the flush failed
-        # the upper still holds the only copy of the cached writes: deleting it here
-        # would discard them, and the overlay remounted below would then expose the
-        # older lower content instead (files appear to revert to an older version).
-        # flush_pending_on_boot() has always preserved the upper on failure; this
-        # path is being brought in line with it.
-        try:
-            if ok:
-                if upper.exists():
-                    shutil.rmtree(upper, ignore_errors=True)
-                upper.mkdir(parents=True, exist_ok=True)
-                sync_upper_attrs(upper, p, entry.uid, entry.gid, entry.perms)
-                log(f"RECREATED_UPPERDIR: {upper}")
-            else:
-                upper.mkdir(parents=True, exist_ok=True)
-                log(f"PRESERVED_UPPERDIR: {upper} (pending flush retry)", "WARN")
-
-            # The workdir is overlayfs scratch space and never holds user data, so
-            # it is always recreated to give the remount below a clean one.
-            if work.exists():
-                shutil.rmtree(work, ignore_errors=True)
-            work.mkdir(parents=True, exist_ok=True)
-            log(f"RECREATED_WORKDIR: {work}")
-        except Exception as e:
-            log(f"DIR_RECREATE_FAILED: {e}", "ERROR")
-            errors += 1
-
-        # Remount overlay (always) so merged view sees the new lower state
-        opts = f"lowerdir={lower},upperdir={upper},workdir={work},metacopy=off,redirect_dir=off,index=off"
-        log(f"POST-FLUSH_MOUNT: {p} lowerdir={lower}")
-        mount_result = run(["mount", "-t", "overlay", "overlay", "-o", opts, str(p)], check=False)
-
-        if mount_result.returncode != 0:
-            log(f"POST-FLUSH_MOUNT_FAILED: {p} - exit {mount_result.returncode}", "ERROR")
-            errors += 1
+        # A signal arriving mid-path is acted on only once this path is back in
+        # a consistent state (flushed or preserved, overlay remounted).
+        with signals_deferred():
+            errors += _flush_path(entry, ws_root, teardown)
 
     log("FLUSH_COMPLETE: Success" if errors == 0 else f"FLUSH_COMPLETE: {errors} errors",
         "ERROR" if errors else "INFO")
     return errors == 0
+
+def _flush_path(entry, ws_root: Path, teardown: bool) -> int:
+    """Flush one path; returns the number of errors."""
+    errors = 0
+    p = Path(entry.path).resolve()
+    name = sanitize_name(str(p))
+
+    if not teardown:
+        held = [l for l in BUSY_LOCKS.get(str(p), ()) if lock_is_held(l)]
+        if held:
+            log(f"FLUSH_DEFERRED: {p} - {', '.join(held)} held; upper kept for the next flush", "WARN")
+            return 0
+
+    # Prefer the directories of the overlay CURRENTLY mounted at 'p'. The
+    # configured workspace_root can drift after overlays are mounted (e.g. the
+    # workspace type/root is changed in the UI while overlays are live). Flushing
+    # the live overlay's own upper/lower/work avoids operating on the wrong
+    # (usually empty) workspace and silently discarding cached data.
+    live = live_overlay_dirs(p)
+    if live:
+        lower = Path(live["lower"])
+        upper = Path(live["upper"])
+        work = Path(live["work"])
+        if upper.parent != (ws_root / name):
+            log(f"WORKSPACE_DRIFT: {p} live workspace={upper.parent} configured={ws_root / name}; using live", "WARN")
+    else:
+        upper = ws_root / name / "upper"
+        work = ws_root / name / "work"
+        lower = lower_bind_for(ws_root, name)
+
+    if not upper.exists():
+        log(f"NO_UPPER: {p}", "DEBUG")
+        return 0
+
+    # 1) Unmount overlay FIRST so that 'p' resolves to the real filesystem and so
+    #    that (re)binding the lower below cannot accidentally capture our own
+    #    overlay (which would make the lower bind 'overlay'-sourced and unsafe).
+    if is_overlay_mounted(p):
+        log(f"PRE-FLUSH_UNMOUNT: {p}")
+        # allow_kill=False: never SIGKILL the daemon that owns this data just
+        # to force the unmount. A clean 'stopstart' services entry is the way
+        # to make a busy flush target idle; absent that, the lazy detach
+        # fallback is still far safer than a torn database + stale pidfile.
+        if not force_unmount_with_retry(p, allow_kill=False):
+            log(f"PRE-FLUSH_UNMOUNT_FAILED: {p}", "ERROR")
+            return 1
+
+    # 2) If the lower bind exists but is "poisoned" (overlay), tear it down so it
+    #    can be rebound from the now-real path.
+    if is_mountpoint(lower) and not lower_bind_is_safe(lower):
+        info = findmnt_info(lower)
+        log(f"LOWER_BIND_BAD: {lower} source={info.get('source')} fstype={info.get('fstype')} - recreating", "ERROR")
+        force_unmount_with_retry(lower)
+
+    # 3) Bind the lower from the (now overlay-free) real path if it is missing.
+    if not is_mountpoint(lower):
+        lower.mkdir(parents=True, exist_ok=True)
+        res = run(["mount", "--bind", str(p), str(lower)], check=False)
+        if res.returncode != 0 or not is_mountpoint(lower):
+            log(f"LOWER_BIND_FAILED: {p} -> {lower}", "ERROR")
+            return 1
+        run(["mount", "--make-private", str(lower)], check=False)
+        remount_lower(lower, rw=False, check=False)
+
+    # Final safety check: refuse to flush if lower is not a real mount.
+    if not lower_bind_is_safe(lower):
+        info = findmnt_info(lower)
+        log(f"LOWER_BIND_UNSAFE: refusing to flush {p} -> {lower} (source={info.get('source')} fstype={info.get('fstype')})", "ERROR")
+        return 1
+
+    ok = False
+    try:
+        # RW for rsync. If the lower cannot be made writable, rsync would fail
+        # for every single file; skip the transfer instead of running it against
+        # a read-only target. ok stays False so the upper is preserved below.
+        if not remount_lower(lower, rw=True):
+            log(f"LOWER_RW_FAILED: {lower} - skipping flush of {p}", "ERROR")
+        else:
+            # scrub before syncing (whiteouts/opaque markers)
+            changed, bad = scrub_bad_specials(upper)
+            if changed:
+                log(f"SCRUBBED_UPPER: specials={len(bad)} under {upper}")
+
+            # actual flush
+            ok = rsync_upper_to_lower(str(upper), str(lower),
+                                      enforce_uid=entry.uid,
+                                      enforce_gid=entry.gid,
+                                      enforce_mode=entry.perms)
+
+    except Exception as e:
+        errors += 1
+        log(f"FLUSH_ERROR: {p} - {e}", "ERROR")
+    finally:
+        # ALWAYS go back to RO
+        try:
+            remount_lower(lower, rw=False)
+        except Exception as e2:
+            errors += 1
+            log(f"LOWER_RO_RESTORE_FAILED: {lower} - {e2}", "ERROR")
+
+    if ok:
+        # post-sync cleanup of upper
+        try:
+            try:
+                clear_overlay_opq_and_whiteouts(upper)
+            except Exception:
+                pass
+            clear_upper_dir(str(upper))
+            log(f"FLUSHED: {p}")
+        except Exception as e:
+            errors += 1
+            log(f"CLEAR_UPPER_FAILED: {upper} - {e}", "ERROR")
+    else:
+        errors += 1
+        log(f"FLUSH_FAILED: {p} - upper preserved for retry", "ERROR")
+
+    # Recreate the upper ONLY after a successful flush. When the flush failed
+    # the upper still holds the only copy of the cached writes: deleting it here
+    # would discard them, and the overlay remounted below would then expose the
+    # older lower content instead (files appear to revert to an older version).
+    # flush_pending_on_boot() has always preserved the upper on failure; this
+    # path is being brought in line with it.
+    try:
+        if ok:
+            if upper.exists():
+                shutil.rmtree(upper, ignore_errors=True)
+            upper.mkdir(parents=True, exist_ok=True)
+            sync_upper_attrs(upper, p, entry.uid, entry.gid, entry.perms)
+            log(f"RECREATED_UPPERDIR: {upper}")
+        else:
+            upper.mkdir(parents=True, exist_ok=True)
+            log(f"PRESERVED_UPPERDIR: {upper} (pending flush retry)", "WARN")
+
+        # The workdir is overlayfs scratch space and never holds user data, so
+        # it is always recreated to give the remount below a clean one.
+        if work.exists():
+            shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True, exist_ok=True)
+        log(f"RECREATED_WORKDIR: {work}")
+    except Exception as e:
+        log(f"DIR_RECREATE_FAILED: {e}", "ERROR")
+        errors += 1
+
+    if teardown and ok:
+        log(f"POST-FLUSH_MOUNT_SKIPPED: {p} (teardown follows)", "DEBUG")
+        return errors
+
+    # Remount overlay so merged view sees the new lower state
+    opts = f"lowerdir={lower},upperdir={upper},workdir={work},metacopy=off,redirect_dir=off,index=off"
+    log(f"POST-FLUSH_MOUNT: {p} lowerdir={lower}")
+    mount_result = run(["mount", "-t", "overlay", "overlay", "-o", opts, str(p)], check=False)
+
+    if mount_result.returncode != 0:
+        log(f"POST-FLUSH_MOUNT_FAILED: {p} - exit {mount_result.returncode}", "ERROR")
+        errors += 1
+    return errors
 
 def unmount(cfg, allow_kill: bool = True):
     """Tear down all overlays and (for RAM-backed workspaces) the workspace itself.
@@ -1658,7 +1857,12 @@ def unmount(cfg, allow_kill: bool = True):
         + ("" if allow_kill else " (reconfigure: no kill escalation)"))
     ws_root = get_workspace_root(cfg)
     ws_type = get_workspace_type(cfg)
-    items = list(parse_paths(cfg.get("paths","")))
+    # Capture the zram backing device up front, before anything is unmounted,
+    # so the device can always be reset and hot-removed at the end.
+    zdev = device_for_mount(ws_root) if ws_type == "zram" else ""
+    # Include overlays of paths since removed from the config: left mounted, they
+    # would pin the workspace and survive on a lazily-detached copy of it.
+    items = list(parse_paths(cfg.get("paths",""))) + orphan_entries(cfg)
     # 1) remove any overlay mounted ON the lower bind
     for entry in items:
         path = entry.path
@@ -1672,7 +1876,9 @@ def unmount(cfg, allow_kill: bool = True):
     paths = [Path(entry.path).resolve() for entry in items]
     for p in sorted(paths, key=lambda x: len(str(x)), reverse=True):
         name = sanitize_name(str(p))
-        lower = lower_bind_for(ws_root, name)
+        # The live overlay's own lower, in case it was mounted under another root.
+        live = live_overlay_dirs(p)
+        lower = Path(live["lower"]) if live else lower_bind_for(ws_root, name)
         if is_overlay_mounted(p):
             log(f"UNMOUNT: {p}")
             force_unmount_with_retry(p, allow_kill=allow_kill)
@@ -1692,8 +1898,6 @@ def unmount(cfg, allow_kill: bool = True):
 
     # 5) if workspace is RAM-backed (tmpfs/zram) that we mounted, tear it down
     if ws_type in ("tmpfs", "zram"):
-        # Capture the backing device before unmounting so we can reset the zram.
-        zdev = device_for_mount(ws_root) if ws_type == "zram" else ""
         if is_mountpoint(ws_root):
             log(f"WORKSPACE_UNMOUNT_ROOT: {ws_root}")
             force_unmount_with_retry(ws_root, allow_kill=allow_kill)
@@ -1732,23 +1936,41 @@ def cmd_rotateflush():
     journalctl_rotate_sync()
     cmd_flush()
 
-def cmd_unmount():
+def cmd_unmount() -> bool:
+    """Flush (if configured) and tear down. Returns False if the teardown was
+    refused to protect unflushed data (--reconfigure only)."""
     log("UNMOUNT_CMD: Starting unmount command")
     cfg = load_config()
+    ws_type = get_workspace_type(cfg)
+    flush_ok = True
     if NO_FLUSH:
         log("PRE_UNMOUNT_FLUSH: skipped (--no-flush)", "WARN")
-    elif cfg.get("flush_on_shutdown", True):
+    elif cfg.get("flush_on_shutdown", True) or RECONFIGURE:
+        # flush_on_shutdown only governs shutdown. A --reconfigure teardown of a
+        # RAM workspace would otherwise discard every pending 'flush' write on
+        # each settings change.
         log("PRE_UNMOUNT_FLUSH: Flushing before unmount")
-        flush(cfg)
+        flush_ok = flush(cfg, teardown=True)
+
+    if RECONFIGURE and not flush_ok and ws_type in ("tmpfs", "zram") and is_workspace_ready(cfg):
+        # A failed path keeps its upper for a retry; tearing down the RAM
+        # workspace now would throw it away. At shutdown that is unavoidable,
+        # on a live reconfigure it is not: keep everything mounted instead.
+        log("UNMOUNT_ABORTED: flush failed; keeping the RAM workspace and overlays "
+            "so unflushed writes are not discarded", "ERROR")
+        mount_overlays(cfg)  # remount paths already flushed for the teardown
+        return False
+
     # --reconfigure: a settings change reshuffling overlays on a live system.
     # Never SIGKILL holders to force an unmount there; let a busy overlay
     # lazy-detach and rely on the following mount to re-establish it.
     unmount(cfg, allow_kill=not RECONFIGURE)
+    return True
 
-def cmd_rotateunmount():
+def cmd_rotateunmount() -> bool:
     log("ROTATEUNMOUNT_CMD: Starting rotate+unmount command")
     journalctl_rotate_sync()
-    cmd_unmount()
+    return cmd_unmount()
 
 def cmd_status():
     cfg = load_config()
@@ -1928,6 +2150,7 @@ def main():
             cmdline += " --reconfigure"
         log(f"SCRIPT_START: {cmdline}")
 
+    ok = True
     if cmd == "mount":
         cmd_mount()
     elif cmd == "rotateflush":
@@ -1935,9 +2158,9 @@ def main():
     elif cmd == "flush":
         cmd_flush()
     elif cmd == "unmount":
-        cmd_unmount()
+        ok = cmd_unmount()
     elif cmd == "rotateunmount":
-        cmd_rotateunmount()
+        ok = cmd_rotateunmount()
     elif cmd == "remount":
         cfg = load_config()
         reconfig_paths = {str(Path(e.path).resolve())
@@ -1952,7 +2175,7 @@ def main():
         # actually prevents the 226/NAMESPACE failure below -- not just a log
         # line the admin has to act on later.
         stopped = stop_services(cfg)
-        cmd_unmount()
+        ok = cmd_unmount()
         cmd_mount()
         restart_services(cfg, stopped)
 
@@ -1987,6 +2210,7 @@ def main():
     if cmd in mutating_cmds:
         log(f"SCRIPT_END: omv-writecache {cmd}")
         release_lock()
+    sys.exit(0 if ok else 1)
 
 
 # Handle termination signals (Ctrl+C, kill command)
