@@ -28,6 +28,12 @@ openmediavault-writecache (8.3.0) stable; urgency=medium
     running and tries again at the next flush, so package installs are not
     disrupted.
   * Fix folders with spaces in their names not being detected as cached.
+  * Fix older cached files overwriting newer ones on disk when switching the
+    workspace back to a shared folder that still held old cached data. Those
+    old copies are now moved to a "stale" folder in the workspace instead.
+  * Changing the workspace type no longer restarts the service on top of the
+    remount, so the change is applied once instead of twice, and no longer
+    logs a false "cannot flush" error.
 
  -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Wed, 30 Sep 2026 22:27:43 +0000
 
