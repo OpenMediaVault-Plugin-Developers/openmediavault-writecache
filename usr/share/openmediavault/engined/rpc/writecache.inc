@@ -107,7 +107,11 @@ class OMVRpcServiceWriteCache extends \OMV\Rpc\ServiceAbstract
         $curBacking = $object->get('ram_backing');
         $newBacking = $params['ram_backing'];
         if (($curTmpfs != $newTmpfs) || ($curBacking != $newBacking)) {
-            $cmd = new \OMV\System\Process('omv-writecache', 'unmount');
+            // --reconfigure: this is a live system, so never SIGKILL processes
+            // to win an unmount. It exits non-zero (execute() throws, so the new
+            // config is not saved) if a failed flush left the old workspace in
+            // place to protect unflushed data.
+            $cmd = new \OMV\System\Process('omv-writecache', 'unmount', '--reconfigure');
             $cmd->setRedirect2to1();
             $cmd->execute($output, $exitStatus);
         }
