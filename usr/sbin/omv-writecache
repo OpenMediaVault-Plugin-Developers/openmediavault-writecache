@@ -1161,13 +1161,39 @@ def orphan_entries(cfg: dict) -> list:
     """
     ws_root = get_workspace_root(cfg)
     configured = {str(Path(e.path).resolve()) for e in parse_paths(cfg.get("paths", "") or "")}
+
+    # A recursive bind of a tree containing our overlays (e.g. a backup tool
+    # rbind-mounting / under /tmp) replicates them: the copies show the same
+    # upperdir. Such a copy is NOT an orphan -- flushing it would clear and
+    # recreate the upper the live overlay is still using, sending every later
+    # write into a deleted directory. Group mounts by upperdir to spot them.
+    by_upper = {}
+    for m in get_mounts():
+        if m["fstype"] == "overlay":
+            d = _overlay_dirs(m)
+            if d:
+                by_upper.setdefault(d["upper"], []).append(m["path"])
+    configured_uppers = {u for u, mps in by_upper.items() if any(mp in configured for mp in mps)}
+
     res = []
     seen = set()
+    warned = set()
     for m in get_mounts():
         if m["fstype"] != "overlay" or m["path"] in configured or m["path"] in seen:
             continue
         d = _overlay_dirs(m)
         if not d:
+            continue
+        if d["upper"] in configured_uppers:
+            log(f"OVERLAY_COPY: {m['path']} is a bind copy of a configured overlay; ignored", "DEBUG")
+            continue
+        if len(by_upper[d["upper"]]) > 1:
+            # Several mountpoints of one removed overlay: acting on one would
+            # pull the upper out from under the others. Leave them all alone.
+            if d["upper"] not in warned:
+                log(f"ORPHAN_OVERLAY_SHARED: {', '.join(by_upper[d['upper']])} share upper "
+                    f"{d['upper']}; not touching them -- unmount the copies first", "WARN")
+                warned.add(d["upper"])
             continue
         base = Path(d["upper"]).parent
         if (Path(d["upper"]).name != "upper" or Path(d["lower"]) != base / "lower"
@@ -1758,6 +1784,13 @@ def _flush_path(entry, ws_root: Path, teardown: bool) -> int:
         work = Path(live["work"])
         if upper.parent != (ws_root / name):
             log(f"WORKSPACE_DRIFT: {p} live workspace={upper.parent} configured={ws_root / name}; using live", "WARN")
+        copies = [m["path"] for m in get_mounts()
+                  if m["fstype"] == "overlay" and m["path"] != str(p)
+                  and (_overlay_dirs(m) or {}).get("upper") == live["upper"]]
+        if copies:
+            log(f"OVERLAY_COPIES: {p} is also mounted at {', '.join(copies)} (bind copies, e.g. "
+                f"from a backup tool); writes made through them after this flush are "
+                f"lost -- unmount them", "WARN")
     else:
         upper = ws_root / name / "upper"
         work = ws_root / name / "work"
