@@ -1395,6 +1395,7 @@ def rsync_upper_to_lower(upper_dir, lower_dir, enforce_uid=None, enforce_gid=Non
         "rsync", "-aHA", "--inplace",
         "--no-specials", "--no-devices",
         "--ignore-times",
+        "--no-whole-file",
         "--exclude", ".wh.*",
         "--stats", "--human-readable",
         upper_dir.rstrip("/") + "/",
