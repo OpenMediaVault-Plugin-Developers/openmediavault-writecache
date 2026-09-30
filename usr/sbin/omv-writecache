@@ -1369,7 +1369,7 @@ def rsync_upper_to_lower(upper_dir, lower_dir, enforce_uid=None, enforce_gid=Non
     - Preserve perms, times, ACLs, hardlinks (no xattrs).
     - Avoid specials/devices so we don't mknod transient files.
     - Treat rsync 23/24 as non-fatal (vanished files etc.).
-    - Report number of files transferred.
+    - Report number of files transferred, and rsync's literal/matched bytes.
 
     If enforce_uid/enforce_gid/enforce_mode are given they are applied to
     lower_dir after rsync instead of the saved pre-rsync attributes.  This
@@ -1395,6 +1395,7 @@ def rsync_upper_to_lower(upper_dir, lower_dir, enforce_uid=None, enforce_gid=Non
         "rsync", "-aHA", "--inplace",
         "--no-specials", "--no-devices",
         "--ignore-times",
+        "--no-whole-file",
         "--exclude", ".wh.*",
         "--stats", "--human-readable",
         upper_dir.rstrip("/") + "/",
@@ -1404,6 +1405,11 @@ def rsync_upper_to_lower(upper_dir, lower_dir, enforce_uid=None, enforce_gid=Non
     output = proc.stdout or ""
     transferred = 0
     total_bytes = None
+    # "transferred" is total size of files sent, regardless of rsync's delta
+    # algorithm. Literal/matched split it into new data and data reused from
+    # existing lower copy.
+    literal_data = None
+    matched_data = None
 
     for line in output.splitlines():
         if "Number of regular files transferred" in line:
@@ -1416,6 +1422,10 @@ def rsync_upper_to_lower(upper_dir, lower_dir, enforce_uid=None, enforce_gid=Non
                 total_bytes = line.split(":")[1].strip()
             except IndexError:
                 pass
+        elif "Literal data" in line:
+            literal_data = line.strip()
+        elif "Matched data" in line:
+            matched_data = line.strip()
 
     if transferred > 0 or total_bytes:
         info = []
@@ -1423,6 +1433,10 @@ def rsync_upper_to_lower(upper_dir, lower_dir, enforce_uid=None, enforce_gid=Non
             info.append(f"{transferred} files")
         if total_bytes:
             info.append(f"{total_bytes} transferred")
+        if literal_data:
+            info.append(literal_data)
+        if matched_data:
+            info.append(matched_data)
         log(f"RSYNC_STATS: {upper_dir} -> {lower_dir} :: {'; '.join(info)}", "INFO")
 
     # Restore the root directory's owner/mode.  rsync -a fixes up directory
