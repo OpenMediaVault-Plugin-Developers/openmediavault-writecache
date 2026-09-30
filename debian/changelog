@@ -1,3 +1,36 @@
+openmediavault-writecache (8.3.0) stable; urgency=medium
+
+  * Flushing now writes only the parts of a file that changed, instead of
+    rewriting the whole file, which means less wear on the disk. The log
+    shows how much new data each flush wrote.
+  * Fix cached changes being thrown away when some files failed to copy to
+    disk during a flush. They are now kept and tried again on the next flush.
+  * Fix deleted files coming back after a flush when a folder was deleted
+    and then recreated.
+  * Fix cached changes being lost when saving settings with "flush on
+    shutdown" turned off. Saving settings now always flushes first, and if
+    that flush fails, nothing is unmounted and the settings are not saved.
+  * Saving settings no longer force-kills programs that are using a cached
+    folder.
+  * Fix a folder removed from the Paths list staying cached until reboot,
+    with its changes never written to disk. It is now flushed (if it was set
+    to flush) and removed straight away.
+  * Policy names such as "Flush" now work in any letter case. A misspelled
+    policy is reported as an error and that folder is not cached, instead of
+    its changes being silently discarded.
+  * Fix memory not being released when a zram workspace was unmounted.
+  * Fix the workspace's disk being unmounted when the workspace folder was
+    set to the top of a data disk.
+  * Fix a short window at shutdown where new writes could be lost.
+  * Fix an interrupted flush leaving a folder showing old content until the
+    next reboot.
+  * The regular flush now skips /var/lib/dpkg/updates while apt/dpkg is
+    running and tries again at the next flush, so package installs are not
+    disrupted.
+  * Fix folders with spaces in their names not being detected as cached.
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Wed, 30 Sep 2026 22:27:43 +0000
+
 openmediavault-writecache (8.2.6) stable; urgency=low
 
   * Stop and unmount overlays from a new prerm, not postrm: dpkg removes
