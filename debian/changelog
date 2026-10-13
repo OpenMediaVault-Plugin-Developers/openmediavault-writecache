@@ -1,3 +1,22 @@
+openmediavault-writecache (8.3.1) UNRELEASED; urgency=medium
+
+  * Stop using systemd's deprecated KillMode=none. A flush at shutdown that
+    runs past the timeout now stops cleanly at a safe point instead of being
+    left running.
+  * Fix a zram workspace's memory not being released until reboot when a
+    cached folder was still in use as it was unmounted. It is now freed by a
+    later mount, flush or unmount once nothing is using it.
+  * Fix a false "hot remove failed" warning when unmounting a zram workspace
+    with newer util-linux.
+  * Fix journal entries being lost after flushing /var/log with a persistent
+    journal. journald is now moved to /run while /var/log is flushed or
+    unmounted, and back afterwards, so /var/log no longer has to be forcibly
+    detached.
+  * Fix the plugin's own log missing the lines written while /var/log was
+    being flushed.
+
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Mon, 12 Oct 2026 13:18:25 +0000
+
 openmediavault-writecache (8.3.0) stable; urgency=medium
 
   * Flushing now writes only the parts of a file that changed, instead of
