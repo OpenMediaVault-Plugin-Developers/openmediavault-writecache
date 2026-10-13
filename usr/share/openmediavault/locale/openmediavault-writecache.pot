@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: openmediavault-writecache\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-31 15:36+0000\n"
+"POT-Creation-Date: 2026-10-13 20:52+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -116,13 +116,10 @@ msgstr ""
 msgid "Workspace folder"
 msgstr ""
 
-msgid "Write Cache"
-msgstr ""
-
-msgid "Write Cache settings"
-msgstr ""
-
 msgid "WriteCache"
+msgstr ""
+
+msgid "WriteCache settings"
 msgstr ""
 
 msgid "auto"

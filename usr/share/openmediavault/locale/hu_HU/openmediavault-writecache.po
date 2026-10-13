@@ -3,13 +3,17 @@
 # This file is distributed under the same license as the openmediavault-writecache package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
 # 
+# Translators:
+# Gyuris Gellért <jobel@ujevangelizacio.hu>, 2026
+# 
 #, fuzzy
 msgid ""
 msgstr ""
 "Project-Id-Version: openmediavault-writecache\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-05-31 15:36+0000\n"
+"POT-Creation-Date: 2026-10-13 20:52+0000\n"
 "PO-Revision-Date: 2025-08-17 20:57+0000\n"
+"Last-Translator: Gyuris Gellért <jobel@ujevangelizacio.hu>, 2026\n"
 "Language-Team: Hungarian (Hungary) (https://app.transifex.com/openmediavault-plugin-developers/teams/1854/hu_HU/)\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
@@ -20,44 +24,48 @@ msgstr ""
 msgid ""
 "A workspace shared folder must be selected when not using system memory."
 msgstr ""
+"Ha nem a rendszer memóriáját használja, akkor ki kell választani egy "
+"megosztott mappát a munkaterületnek."
 
 msgid ""
 "Algorithms are enumerated from the running kernel; the set varies by kernel "
 "build."
 msgstr ""
+"Az algoritmusok felsorolása a futó kerneltől függ; a halmaz a kernel-"
+"verziótól függően változik."
 
 msgid "Compressed RAM (zram)"
-msgstr ""
+msgstr "Tömörített RAM (zram)"
 
 msgid "Date & Time"
-msgstr ""
+msgstr "Dátum és idő"
 
 msgid "Details"
-msgstr ""
+msgstr "Részletek"
 
 msgid "Enabled"
-msgstr ""
+msgstr "Engedélyezve"
 
 msgid "Event"
-msgstr ""
+msgstr "Esemény"
 
 msgid "Flush"
-msgstr ""
+msgstr "Kiírás"
 
 msgid "Flush daily"
-msgstr ""
+msgstr "Napi kiírás"
 
 msgid "Flush hourly"
-msgstr ""
+msgstr "Óránkénti kiírás"
 
 msgid "Flush on boot"
-msgstr ""
+msgstr "Kírás újraindításkor"
 
 msgid "Flush on shutdown"
-msgstr ""
+msgstr "Kiírás leállításkor"
 
 msgid "Hour"
-msgstr ""
+msgstr "Óra"
 
 msgid ""
 "If checked, writecache will use system memory to store changes.<br/>If "
@@ -65,92 +73,100 @@ msgid ""
 "folder. Changes are not lost if the system reboots or shuts down "
 "unexpectedly."
 msgstr ""
+"Ha be van jelölve, a writecache a rendszer memóriáját használja a "
+"módosítások tárolására.<br/>Ha nincs bejelölve, a writecache a kiválasztott "
+"megosztott mappában tárolja ezeket a módosításokat. A módosítások nem "
+"vesznek el, ha a rendszer váratlanul újraindul vagy leáll."
 
 msgid "Journal storage"
-msgstr ""
+msgstr "Naplótárolás"
 
 msgid "Level"
-msgstr ""
+msgstr "Szint"
 
 msgid ""
 "Logical (uncompressed) capacity of the zram device. Accepts M/G suffix; e.g."
 " 256M, 512M, 1G. Actual RAM used is the compressed size, typically a "
 "fraction of this."
 msgstr ""
+"A zram eszköz logikai (tömörítetlen) kapacitása. M/G utótagot fogad el; pl. "
+"256M, 512M, 1G. A ténylegesen felhasznált RAM-kapacitás a tömörített méret, "
+"amely általában ennek csak egy töredéke."
 
 msgid "Memory backing"
-msgstr ""
+msgstr "Memória-tároló"
 
 msgid "Minute"
-msgstr ""
+msgstr "Perc"
 
 msgid "Overlay paths and policy"
-msgstr ""
+msgstr "Átfedő útvonalak és házirend"
 
 msgid "RAM (tmpfs)"
-msgstr ""
+msgstr "RAM (tmpfs)"
 
 msgid "Rotate & Flush"
-msgstr ""
+msgstr "Rotálás és kiírás"
 
 msgid "Rotate on daily flush"
-msgstr ""
+msgstr "Rotálása napi kiíráskor"
 
 msgid "Rotate on shutdown"
-msgstr ""
+msgstr "Rotálás leállításkor"
 
 msgid "Run journalctl rotate and sync before flush"
-msgstr ""
+msgstr "A journalctl rotate és sync végrehajtása a kiírás előtt"
 
 msgid "Running manual flush ..."
-msgstr ""
+msgstr "Kézi kiírás végrehajtása"
 
 msgid "Running manual rotate and flush ..."
-msgstr ""
+msgstr "Kézi rotálás és kiírás végrehajtása"
 
 msgid "Services to reload/restart after flush"
-msgstr ""
+msgstr "Kiírás után újratöltendő/újraindítandó szolgáltatások"
 
 msgid ""
 "Size for /run/omv-writecache tmpfs. Accepts %, M/G suffix; e.g. 512M, 2G, "
 "25%."
 msgstr ""
+"A /run/omv-writecache tmpfs mérete. Elfogadja a % és az M/G utótagokat; pl. "
+"512M, 2G, 25%."
 
 msgid "Status"
-msgstr ""
+msgstr "Állapot"
 
 msgid "Use system memory"
-msgstr ""
+msgstr "Rendszermemória használata"
 
 msgid "Used to store temporary writecache changes."
 msgstr ""
+"Az ideiglenes írási gyorsítótárban bekövetkező változások tárolására "
+"szolgál."
 
 msgid "Workspace folder"
-msgstr ""
-
-msgid "Write Cache"
-msgstr ""
-
-msgid "Write Cache settings"
-msgstr ""
+msgstr "Munkaterület mappa"
 
 msgid "WriteCache"
+msgstr "WriteCache"
+
+msgid "WriteCache settings"
 msgstr ""
 
 msgid "auto"
-msgstr ""
+msgstr "automatikus"
 
 msgid "persistent (disk)"
-msgstr ""
+msgstr "állandó (lemez)"
 
 msgid "tmpfs size"
-msgstr ""
+msgstr "tmpfs méret"
 
 msgid "volatile (RAM)"
-msgstr ""
+msgstr "változó (RAM)"
 
 msgid "zram compression"
-msgstr ""
+msgstr "zram tömörítés"
 
 msgid "zram size"
-msgstr ""
+msgstr "zram mérete"
