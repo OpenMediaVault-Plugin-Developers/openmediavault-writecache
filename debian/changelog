@@ -14,6 +14,10 @@ openmediavault-writecache (8.3.1) UNRELEASED; urgency=medium
     detached.
   * Fix the plugin's own log missing the lines written while /var/log was
     being flushed.
+  * Fix log lines from services that keep their logs open (nginx, rsyslog,
+    samba, php-fpm, monit...) being lost after every scheduled flush. A
+    folder that is in use is now written to disk without being unmounted;
+    its RAM is freed by a later flush that finds it idle, or at shutdown.
 
  -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Mon, 12 Oct 2026 13:18:25 +0000
 
