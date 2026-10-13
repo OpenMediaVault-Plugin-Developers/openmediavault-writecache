@@ -23,7 +23,7 @@ try:
 except Exception:
     yaml = None
 
-SCRIPT_VERSION = "0.1.6"
+SCRIPT_VERSION = "0.1.7"
 CONFIG = Path("/etc/omv-writecache/config.yaml")
 
 # Workspace root for overlay metadata (lower binds, upperdirs, workdirs).
@@ -1978,6 +1978,7 @@ def _flush_path(entry, ws_root: Path, teardown: bool) -> int:
     # the live overlay's own upper/lower/work avoids operating on the wrong
     # (usually empty) workspace and silently discarding cached data.
     live = live_overlay_dirs(p)
+    copies = []
     if live:
         lower = Path(live["lower"])
         upper = Path(live["upper"])
@@ -1987,10 +1988,6 @@ def _flush_path(entry, ws_root: Path, teardown: bool) -> int:
         copies = [m["path"] for m in get_mounts()
                   if m["fstype"] == "overlay" and m["path"] != str(p)
                   and (_overlay_dirs(m) or {}).get("upper") == live["upper"]]
-        if copies:
-            log(f"OVERLAY_COPIES: {p} is also mounted at {', '.join(copies)} (bind copies, e.g. "
-                f"from a backup tool); writes made through them after this flush are "
-                f"lost -- unmount them", "WARN")
     else:
         upper = ws_root / name / "upper"
         work = ws_root / name / "work"
@@ -2105,6 +2102,12 @@ def _flush_path(entry, ws_root: Path, teardown: bool) -> int:
             upper.mkdir(parents=True, exist_ok=True)
             sync_upper_attrs(upper, p, entry.uid, entry.gid, entry.perms)
             log(f"RECREATED_UPPERDIR: {upper}")
+            # Only a cleared upper strands the copies: they still write into
+            # the deleted one. An in-place flush never gets here.
+            if copies:
+                log(f"OVERLAY_COPIES: {p} is also mounted at {', '.join(copies)} (bind copies, e.g. "
+                    f"from a backup tool); writes made through them after this flush are "
+                    f"lost -- unmount them", "WARN")
         else:
             upper.mkdir(parents=True, exist_ok=True)
             log(f"PRESERVED_UPPERDIR: {upper} (pending flush retry)", "WARN")
