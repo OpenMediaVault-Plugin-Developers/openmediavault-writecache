@@ -23,7 +23,7 @@ try:
 except Exception:
     yaml = None
 
-SCRIPT_VERSION = "0.1.5"
+SCRIPT_VERSION = "0.1.6"
 CONFIG = Path("/etc/omv-writecache/config.yaml")
 
 # Workspace root for overlay metadata (lower binds, upperdirs, workdirs).
@@ -715,11 +715,13 @@ def force_unmount_with_retry(path: Path, max_retries: int = 3, allow_kill: bool 
     It succeeds outright for idle targets (/var/tmp, /var/cache/apt/archives), so
     those get a clean unmount with no loss window at all.
 
-    Lazy unmount is kept as the final fallback because busy targets like /var/log
-    (journald holds the active journal open) cannot be unmounted any other way,
-    and refusing would stop the flush from working at all. It is now logged as a
-    warning naming the fix: give that path a 'stopstart' entry in the services
-    list, or use rotateflush, so the writer releases its fds first.
+    Lazy unmount is kept as the final fallback for teardown and reconfigure,
+    because busy targets like /var/log (nginx, rsyslog, samba... hold their
+    logs open) cannot be unmounted any other way. A routine flush never gets
+    here for a busy path: it uses unmount_if_idle() and syncs in place instead
+    (see _flush_in_place). It is logged as a warning naming the fix: give that
+    path a 'stopstart' entry in the services list so the writer releases its
+    fds first.
 
     Paths in LAZY_UNMOUNT_PATHS skip the kill escalation entirely: their writer
     is a supervised daemon that respawns and reopens the mount before the retry
@@ -761,6 +763,23 @@ def force_unmount_with_retry(path: Path, max_retries: int = 3, allow_kill: bool 
         return wait_for_unmount(path, 5)
 
     return False
+
+def unmount_if_idle(path: Path, attempts: int = 3, delay: float = 1.0) -> bool:
+    """Plain umount only, retried briefly; never kills, never detaches lazily.
+
+    The delay gives a writer that was just asked to let go (journald after
+    --relinquish-var) time to close its files. Returns False if 'path' is
+    still busy, leaving the overlay mounted and untouched.
+    """
+    for attempt in range(attempts):
+        if attempt:
+            time.sleep(delay)
+        if not is_mountpoint(path) and not is_overlay_mounted(path):
+            return True
+        if run(["umount", str(path)], check=False, fail_level="DEBUG").returncode == 0:
+            if wait_for_unmount(path, 5):
+                return True
+    return not is_mountpoint(path) and not is_overlay_mounted(path)
 
 def mounts_under(prefix: Path) -> list[Path]:
     """Mountpoints strictly below 'prefix' (never 'prefix' itself).
@@ -826,14 +845,16 @@ def ensure_lower_bind(workspace_root: Path, real_path: Path, name: str) -> Path:
     remount_lower(lower, rw=False, check=False)
     return lower
 
-def run(cmd, check=True, quiet=False):
+def run(cmd, check=True, quiet=False, fail_level="ERROR"):
+    """fail_level lowers the log level of a failure the caller expects and
+    handles (e.g. EBUSY from a plain umount probe)."""
     cmd_str = ' '.join(cmd)
     log(f"CMD: {cmd_str}", "DEBUG")
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd="/")
     if res.returncode != 0:
-        log(f"CMD_FAILED: {cmd_str} (exit {res.returncode})", "ERROR")
+        log(f"CMD_FAILED: {cmd_str} (exit {res.returncode})", fail_level)
         if res.stdout.strip() and not quiet:
-            log(f"OUTPUT: {res.stdout.strip()}", "ERROR")
+            log(f"OUTPUT: {res.stdout.strip()}", fail_level)
         if check:
             raise SystemExit(res.returncode)
     else:
@@ -1734,14 +1755,60 @@ def rsync_upper_to_lower(upper_dir, lower_dir, enforce_uid=None, enforce_gid=Non
     log(f"RSYNC: {upper_dir} -> {lower_dir}", "DEBUG")
     whiteouts_ok = apply_whiteouts(upper_dir, lower_dir)
 
+    ok = _rsync_into_lower(upper_dir, lower_dir, ["--ignore-times", "--exclude", ".wh.*"],
+                           lower_root_stat, enforce_uid, enforce_gid, enforce_mode)
+    if not whiteouts_ok:
+        log(f"WHITEOUTS_FAILED: {upper_dir} -> {lower_dir} (deletions not fully applied)", "ERROR")
+        return False
+    return ok
+
+def _rsync_exclude_pattern(rel: str) -> str:
+    """Anchored rsync pattern matching exactly 'rel' (wildcards escaped)."""
+    return "/" + re.sub(r"([*?\[\\])", r"\\\1", rel)
+
+def rsync_merged_to_lower(merged_dir, lower_dir, enforce_uid=None, enforce_gid=None, enforce_mode=None):
+    """
+    Sync the live overlay's merged view -> lower, with the overlay still mounted.
+
+    The merged view already has deletions applied, so --delete replaces the
+    whiteout handling. Files not in the upper are the lower's own files seen
+    through the overlay, identical in size and mtime, so the quick check skips
+    them and rsync only writes lower files the upper has shadowed -- which the
+    overlay no longer reads from lower. --ignore-times is left out for that
+    reason: it would re-read every file under the path on every flush. The
+    quick check compares mtimes to the nanosecond (--modify-window=-1): at the
+    default whole-second precision, a same-size rewrite in the second of the
+    previous flush (a state file) would be skipped on every later flush.
+
+    Mounts below merged_dir (another managed path, a bind) are excluded, which
+    also keeps --delete away from the lower's copy of them.
+    """
+    merged_dir = os.path.abspath(merged_dir)
+    lower_dir = os.path.abspath(lower_dir)
+    lower_root_stat = os.stat(lower_dir)
+
+    excludes = []
+    for m in get_mounts():
+        rel = os.path.relpath(m["path"], merged_dir)
+        if rel != "." and not rel.startswith(".."):
+            excludes += ["--exclude", _rsync_exclude_pattern(rel)]
+
+    log(f"RSYNC_MERGED: {merged_dir} -> {lower_dir}", "DEBUG")
+    return _rsync_into_lower(merged_dir, lower_dir,
+                             ["--delete", "--modify-window=-1"] + excludes,
+                             lower_root_stat, enforce_uid, enforce_gid, enforce_mode)
+
+def _rsync_into_lower(src_dir, lower_dir, extra_args, lower_root_stat,
+                      enforce_uid=None, enforce_gid=None, enforce_mode=None) -> bool:
+    """Run the rsync shared by both flush kinds, log its stats and restore the
+    lower root's attributes. Returns True on success (or vanished files)."""
     args = [
         "rsync", "-aHA", "--inplace",
         "--no-specials", "--no-devices",
-        "--ignore-times",
         "--no-whole-file",
-        "--exclude", ".wh.*",
+    ] + extra_args + [
         "--stats", "--human-readable",
-        upper_dir.rstrip("/") + "/",
+        src_dir.rstrip("/") + "/",
         lower_dir.rstrip("/") + "/",
     ]
     proc = run(args, check=False, quiet=True)
@@ -1780,14 +1847,14 @@ def rsync_upper_to_lower(upper_dir, lower_dir, enforce_uid=None, enforce_gid=Non
             info.append(literal_data)
         if matched_data:
             info.append(matched_data)
-        log(f"RSYNC_STATS: {upper_dir} -> {lower_dir} :: {'; '.join(info)}", "INFO")
+        log(f"RSYNC_STATS: {src_dir} -> {lower_dir} :: {'; '.join(info)}", "INFO")
 
     # Restore the root directory's owner/mode.  rsync -a fixes up directory
     # attributes at the end of the transfer, including the destination root,
-    # which would otherwise inherit upper/'s owner/mode.
+    # which would otherwise inherit the source root's owner/mode.
     # If the caller specified enforce_* values, use those; otherwise fall back
-    # to the pre-rsync attributes captured above so we never alter the real
-    # directory's ownership/permissions.
+    # to the pre-rsync attributes captured by the caller so we never alter the
+    # real directory's ownership/permissions.
     final_uid  = enforce_uid  if enforce_uid  is not None else lower_root_stat.st_uid
     final_gid  = enforce_gid  if enforce_gid  is not None else lower_root_stat.st_gid
     final_mode = enforce_mode if enforce_mode is not None else stat.S_IMODE(lower_root_stat.st_mode)
@@ -1798,15 +1865,12 @@ def rsync_upper_to_lower(upper_dir, lower_dir, enforce_uid=None, enforce_gid=Non
     except Exception as e:
         log(f"RSYNC_ROOT_ATTR_RESTORE_FAILED: {lower_dir} - {e}", "WARN")
 
-    if not whiteouts_ok:
-        log(f"WHITEOUTS_FAILED: {upper_dir} -> {lower_dir} (deletions not fully applied)", "ERROR")
-        return False
     if proc.returncode == 0:
-        log(f"RSYNC_OK: {upper_dir} -> {lower_dir}", "DEBUG")
+        log(f"RSYNC_OK: {src_dir} -> {lower_dir}", "DEBUG")
         return True
     if proc.returncode == 24:
         # Source files vanished mid-transfer; everything still present was copied.
-        log(f"RSYNC_WARN(24): {upper_dir} -> {lower_dir} (vanished files)", "WARN")
+        log(f"RSYNC_WARN(24): {src_dir} -> {lower_dir} (vanished files)", "WARN")
         return True
     log(f"RSYNC_FAILED: exit {proc.returncode} ({output.strip()})", "ERROR")
     return False
@@ -1941,6 +2005,11 @@ def _flush_path(entry, ws_root: Path, teardown: bool) -> int:
     #    overlay (which would make the lower bind 'overlay'-sourced and unsafe).
     if is_overlay_mounted(p):
         log(f"PRE-FLUSH_UNMOUNT: {p}")
+        # A routine flush never detaches a busy overlay: every process holding
+        # a file open in it would keep writing into the upper deleted below
+        # (nginx, rsyslog, samba... on /var/log). Sync it in place instead.
+        if not teardown and live and not unmount_if_idle(p):
+            return _flush_in_place(entry, p, lower, upper)
         # allow_kill=False: never SIGKILL the daemon that owns this data just
         # to force the unmount. A clean 'stopstart' services entry is the way
         # to make a busy flush target idle; absent that, the lazy detach
@@ -2062,6 +2131,48 @@ def _flush_path(entry, ws_root: Path, teardown: bool) -> int:
     if mount_result.returncode != 0:
         log(f"POST-FLUSH_MOUNT_FAILED: {p} - exit {mount_result.returncode}", "ERROR")
         errors += 1
+    return errors
+
+def _flush_in_place(entry, p: Path, lower: Path, upper: Path) -> int:
+    """Flush a busy overlay without unmounting it; returns the number of errors.
+
+    The merged view is synced to the lower and the overlay stays mounted, so
+    open files keep working and nothing written to them is lost. The upper is
+    not cleared, so its RAM is only given back by a flush that finds the path
+    idle, or by the unmount at shutdown.
+    """
+    if not is_mountpoint(lower) or not lower_bind_is_safe(lower):
+        # It cannot be rebound from 'p' while the overlay covers it.
+        log(f"FLUSH_IN_PLACE_FAILED: {p} - lower bind {lower} missing or unsafe; "
+            f"upper kept for the next flush", "ERROR")
+        return 1
+
+    log(f"FLUSH_IN_PLACE: {p} is in use; syncing it without unmounting")
+    errors = 0
+    ok = False
+    try:
+        if not remount_lower(lower, rw=True):
+            log(f"LOWER_RW_FAILED: {lower} - skipping flush of {p}", "ERROR")
+        else:
+            ok = rsync_merged_to_lower(str(p), str(lower),
+                                       enforce_uid=entry.uid,
+                                       enforce_gid=entry.gid,
+                                       enforce_mode=entry.perms)
+    except Exception as e:
+        errors += 1
+        log(f"FLUSH_ERROR: {p} - {e}", "ERROR")
+    finally:
+        try:
+            remount_lower(lower, rw=False)
+        except Exception as e2:
+            errors += 1
+            log(f"LOWER_RO_RESTORE_FAILED: {lower} - {e2}", "ERROR")
+
+    if ok:
+        log(f"FLUSHED_IN_PLACE: {p} (upper kept, {fmt_bytes(get_dir_size_bytes(upper))})")
+    else:
+        errors += 1
+        log(f"FLUSH_FAILED: {p} - upper preserved for retry", "ERROR")
     return errors
 
 def unmount(cfg, allow_kill: bool = True):
@@ -2372,7 +2483,7 @@ def main():
             cmdline += " --daily"
         if RECONFIGURE:
             cmdline += " --reconfigure"
-        log(f"SCRIPT_START: {cmdline}")
+        log(f"SCRIPT_START: {cmdline} (v{SCRIPT_VERSION})")
         reclaim_pending_zram()
 
     ok = True
