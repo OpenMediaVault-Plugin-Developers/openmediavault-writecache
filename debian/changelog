@@ -1,4 +1,4 @@
-openmediavault-writecache (8.3.1) UNRELEASED; urgency=medium
+openmediavault-writecache (8.3.1) stable; urgency=low
 
   * Stop using systemd's deprecated KillMode=none. A flush at shutdown that
     runs past the timeout now stops cleanly at a safe point instead of being
@@ -19,7 +19,7 @@ openmediavault-writecache (8.3.1) UNRELEASED; urgency=medium
     folder that is in use is now written to disk without being unmounted;
     its RAM is freed by a later flush that finds it idle, or at shutdown.
 
- -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Mon, 12 Oct 2026 13:18:25 +0000
+ -- OpenMediaVault Plugin Developers <plugins@omv-extras.org>  Tue, 13 Oct 2026 14:27:50 +0000
 
 openmediavault-writecache (8.3.0) stable; urgency=medium
 
