@@ -1510,7 +1510,7 @@ class WriteCacheTest:
 
         saved = {k: getattr(mod, k) for k in
                  ("cmd_unmount", "cmd_mount", "check_and_create_lock",
-                  "release_lock", "ensure_persistent_journal",
+                  "release_lock", "ensure_persistent_journal", "reclaim_pending_zram",
                   "_unit_is_active", "_run_systemctl")}
         saved_argv = sys.argv[:]
         saved_geteuid = _os.geteuid
@@ -1523,6 +1523,7 @@ class WriteCacheTest:
             mod.check_and_create_lock = lambda name: None
             mod.release_lock = lambda: None
             mod.ensure_persistent_journal = lambda: None
+            mod.reclaim_pending_zram = lambda: None
             # remount now also wraps the Services list around unmount/mount
             # (like cmd_flush already did); never let this test touch the
             # real host's units.
@@ -1594,7 +1595,7 @@ class WriteCacheTest:
 
         saved = {k: getattr(mod, k) for k in
                  ("cmd_unmount", "cmd_mount", "check_and_create_lock",
-                  "release_lock", "ensure_persistent_journal", "subprocess",
+                  "release_lock", "ensure_persistent_journal", "reclaim_pending_zram", "subprocess",
                   "load_config", "_run_systemctl", "_unit_is_active", "log")}
         saved_argv = sys.argv[:]
         saved_geteuid = _os.geteuid
@@ -1613,12 +1614,20 @@ class WriteCacheTest:
             STDOUT = mod.subprocess.STDOUT
             DEVNULL = mod.subprocess.DEVNULL
 
+        def run_main():
+            # main() always ends in sys.exit() with the command's status.
+            try:
+                mod.main()
+            except SystemExit:
+                pass
+
         try:
             mod.cmd_unmount = lambda: None
             mod.cmd_mount = lambda: None
             mod.check_and_create_lock = lambda name: None
             mod.release_lock = lambda: None
             mod.ensure_persistent_journal = lambda: None
+            mod.reclaim_pending_zram = lambda: None
             mod.subprocess = FakeSubprocess
             mod._unit_is_active = lambda name: True
 
@@ -1642,7 +1651,7 @@ class WriteCacheTest:
             mod.RECONFIGURE = False
             _os.geteuid = lambda: 0
             sys.argv = ["omv-writecache", "remount", "--reconfigure"]
-            mod.main()
+            run_main()
 
             scans_with_var_tmp = scan_calls["count"]
             warned_when_unhandled = list(warnings)
@@ -1653,7 +1662,7 @@ class WriteCacheTest:
             # spends time probing every running unit's PrivateTmp property.
             mod.load_config = lambda: {"paths": "/var/log = drop\n"}
             sys.argv = ["omv-writecache", "remount", "--reconfigure"]
-            mod.main()
+            run_main()
 
             scans_without_var_tmp = scan_calls["count"] - scans_with_var_tmp
 
@@ -1667,12 +1676,10 @@ class WriteCacheTest:
                 "services": "has-private-tmp.service = restart\n",
             }
             sys.argv = ["omv-writecache", "remount", "--reconfigure"]
-            mod.main()
+            run_main()
 
             restarted_when_handled = list(restarted)
             warned_when_handled = list(warnings)
-        except SystemExit:
-            pass
         finally:
             for k, v in saved.items():
                 setattr(mod, k, v)
@@ -1748,6 +1755,24 @@ class WriteCacheTest:
         log_test(f"Drop-in DefaultDependencies=no: {'OK' if has_nodeps else 'FAIL'}", "SUCCESS" if has_nodeps else "FAIL")
         log_test(f"Drop-in Before=omv-writecache-setup.service: {'OK' if has_before else 'FAIL'}", "SUCCESS" if has_before else "FAIL")
         return has_nodeps and has_before
+
+    def test_setup_unit_kill_mode(self) -> bool:
+        """A stop timeout must SIGTERM only the script (which defers it until the
+        path is consistent), never its rsync child, and never SIGKILL either."""
+        log_test("\n>>> Test: setup unit kill mode", "INFO")
+
+        unit = Path("/etc/systemd/system/omv-writecache-setup.service")
+        if not unit.exists():
+            log_test(f"Unit not found: {unit}", "FAIL")
+            return False
+
+        content = unit.read_text()
+        has_mixed = "KillMode=mixed" in content
+        no_sigkill = "SendSIGKILL=no" in content
+
+        log_test(f"KillMode=mixed: {'OK' if has_mixed else 'FAIL'}", "SUCCESS" if has_mixed else "FAIL")
+        log_test(f"SendSIGKILL=no: {'OK' if no_sigkill else 'FAIL'}", "SUCCESS" if no_sigkill else "FAIL")
+        return has_mixed and no_sigkill
 
     def test_mount_unit_ordering(self) -> bool:
         """After mount, verify systemd applied the drop-in to the workspace mount unit."""
@@ -2455,6 +2480,7 @@ class WriteCacheTest:
 
             # Drop-in file (static check, before any mounting)
             results["dropin_file"] = self.test_dropin_file()
+            results["setup_unit_kill_mode"] = self.test_setup_unit_kill_mode()
 
             # Unit test: live overlay dir parsing (no mounting required)
             results["live_overlay_dirs_parsing"] = self.test_live_overlay_dirs_parsing()
