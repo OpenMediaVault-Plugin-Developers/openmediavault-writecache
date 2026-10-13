@@ -152,7 +152,7 @@ omv-writecache-setup_service:
         ExecStop=/usr/sbin/omv-writecache {{ shutdown_action }}
         TimeoutStartSec=180
         TimeoutStopSec=300
-        KillMode=none
+        KillMode=mixed
         SendSIGKILL=no
 
         [Install]

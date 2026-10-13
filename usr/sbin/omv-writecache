@@ -10,7 +10,7 @@ import os, sys, subprocess, time, re, shutil
 import stat
 import pwd, grp
 import atexit, signal
-import fcntl
+import errno, fcntl
 import contextlib
 from pathlib import Path
 from collections import namedtuple
@@ -89,17 +89,48 @@ DAILY_FLUSH = False
 RECONFIGURE = False
 LOG_ENABLED = True
 
+# Lines held back while the overlay containing LOG_FILE is being flushed; see
+# log_held_during().
+_LOG_HELD = None
+
+def _write_log_lines(lines):
+    try:
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        with open(LOG_FILE, "a") as f:
+            f.writelines(lines)
+    except Exception:
+        pass
+
 def log(msg: str, level: str = "INFO"):
     if not LOG_ENABLED:
         return
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"{ts} - {msg}")
+    line = f"{ts} [{level}] {msg}\n"
+    if _LOG_HELD is not None:
+        _LOG_HELD.append(line)
+    else:
+        _write_log_lines([line])
+
+@contextlib.contextmanager
+def log_held_during(p: Path):
+    """Hold log lines back while the overlay at p, which contains LOG_FILE, is
+    flushed. Written while it is unmounted they would land in the file on disk,
+    and the rsync of the upper's copy over it would then erase them."""
+    global _LOG_HELD
     try:
-        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-        with open(LOG_FILE, "a") as f:
-            f.write(f"{ts} [{level}] {msg}\n")
+        under = p in Path(LOG_FILE).resolve().parents
     except Exception:
-        pass
+        under = False
+    if not under or _LOG_HELD is not None:
+        yield
+        return
+    _LOG_HELD = []
+    try:
+        yield
+    finally:
+        lines, _LOG_HELD = _LOG_HELD, None
+        _write_log_lines(lines)
 
 # locking
 def get_lock_filename(lockname):
@@ -339,6 +370,9 @@ def device_for_mount(path: Path) -> str:
     return ""
 
 ZRAM_CONTROL = "/sys/class/zram-control"
+# zram devices whose reset failed, retried by reclaim_pending_zram(). In /run
+# so it is cleared on reboot, along with the devices themselves.
+ZRAM_PENDING_FILE = Path("/run/omv-writecache-zram-pending")
 
 def _zram_backend_modules(algo: str) -> list:
     """Candidate kernel module names that provide a zram compression backend.
@@ -423,17 +457,67 @@ def alloc_zram_device(size: str, algo: str) -> str:
     log(f"ZRAM_ALLOC: {dev} size={size} algo={algo}")
     return dev
 
-def free_zram_device(dev: str) -> None:
-    """Reset and hot-remove a zram device so devices don't accumulate."""
+def _zram_busy(dev: str) -> bool:
+    """True while something still holds the device, typically the filesystem of
+    a workspace that was lazily detached while overlays on it were busy. An
+    exclusive open fails with EBUSY for as long as that filesystem exists."""
+    try:
+        os.close(os.open(dev, os.O_RDONLY | os.O_EXCL))
+        return False
+    except OSError as e:
+        return e.errno == errno.EBUSY
+
+def _read_zram_pending() -> list:
+    try:
+        return [l.strip() for l in ZRAM_PENDING_FILE.read_text().splitlines() if l.strip()]
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        log(f"ZRAM_PENDING_READ_FAILED: {ZRAM_PENDING_FILE} - {e}", "WARN")
+        return []
+
+def _write_zram_pending(devs: list) -> None:
+    try:
+        if devs:
+            ZRAM_PENDING_FILE.write_text("".join(f"{d}\n" for d in devs))
+        else:
+            ZRAM_PENDING_FILE.unlink(missing_ok=True)
+    except Exception as e:
+        log(f"ZRAM_PENDING_WRITE_FAILED: {ZRAM_PENDING_FILE} - {e}", "WARN")
+
+def free_zram_device(dev: str) -> bool:
+    """Reset and hot-remove a zram device so devices don't accumulate.
+
+    A device still held (see _zram_busy) can't be reset. It is recorded in
+    ZRAM_PENDING_FILE so reclaim_pending_zram() frees it on a later run, once
+    the holders have closed their files, instead of keeping its RAM until
+    reboot. Returns True once the device is reset.
+    """
     if not dev.startswith("/dev/zram"):
-        return
+        return False
     try:
         idx = int(dev.replace("/dev/zram", ""))
     except ValueError:
-        return
+        return False
+    pending = _read_zram_pending()
+    if _zram_busy(dev):
+        log(f"ZRAM_BUSY: {dev} is still held (lazily detached workspace); "
+            "will retry the reset on a later run", "WARN")
+        if dev not in pending:
+            _write_zram_pending(pending + [dev])
+        return False
     # Reset frees the compressed pages held in RAM.
-    run(["zramctl", "-r", dev], check=False)
-    # Hot-remove returns the device to the kernel.
+    if run(["zramctl", "-r", dev], check=False).returncode != 0:
+        if dev not in pending:
+            _write_zram_pending(pending + [dev])
+        return False
+    if dev in pending:
+        _write_zram_pending([d for d in pending if d != dev])
+    # Hot-remove returns the device to the kernel. zramctl from util-linux
+    # 2.39+ already did that as part of the reset.
+    if not Path(f"/sys/block/zram{idx}").exists():
+        log(f"ZRAM_HOT_REMOVE: {dev}")
+        return True
     hot_remove = os.path.join(ZRAM_CONTROL, "hot_remove")
     if os.path.exists(hot_remove):
         try:
@@ -442,6 +526,19 @@ def free_zram_device(dev: str) -> None:
             log(f"ZRAM_HOT_REMOVE: {dev}")
         except Exception as e:
             log(f"ZRAM_HOT_REMOVE_FAILED: {dev} - {e}", "WARN")
+    return True
+
+def reclaim_pending_zram() -> None:
+    """Free zram devices whose reset failed on an earlier run."""
+    for dev in _read_zram_pending():
+        if not Path(f"/sys/block/{Path(dev).name}").exists():
+            log(f"ZRAM_PENDING_GONE: {dev}", "DEBUG")
+            _write_zram_pending([d for d in _read_zram_pending() if d != dev])
+        elif _zram_busy(dev):
+            log(f"ZRAM_PENDING_BUSY: {dev} still held", "DEBUG")
+        else:
+            log(f"ZRAM_RECLAIM: {dev} no longer held; freeing it")
+            free_zram_device(dev)
 
 def list_zram_algorithms() -> list:
     """Return the zram compression algorithms supported by the running kernel.
@@ -787,6 +884,27 @@ def journalctl_rotate_sync():
         run(["journalctl", "--sync"], check=False)
     except Exception as e:
         log(f"journalctl rotate/sync failed: {e}", "WARN")
+
+JOURNAL_DIR = Path("/var/log/journal")
+
+def holds_journal(p: Path) -> bool:
+    """True if the overlay at p contains journald's persistent journal."""
+    return p == JOURNAL_DIR or p in JOURNAL_DIR.parents
+
+def journal_relinquish():
+    """Have journald close its files under /var/log and write to /run instead.
+
+    journald keeps the active journal open, so /var/log could otherwise only be
+    lazily detached, leaving journald writing into a detached overlay whose
+    upper is then deleted. A no-op when the journal is not persistent.
+    """
+    log("JOURNAL_RELINQUISH: moving journald to /run/log/journal")
+    run(["journalctl", "--relinquish-var"], check=False)
+
+def journal_reclaim():
+    """Move journald back to /var/log/journal, with what it wrote meanwhile."""
+    log("JOURNAL_RECLAIM: moving journald back to /var/log/journal")
+    run(["journalctl", "--flush"], check=False)
 
 def load_config():
     defaults = {
@@ -1435,6 +1553,7 @@ def mount_overlays(cfg):
     if cfg.get("flush_on_boot", False) and ws_type == "path":
         flush_pending_on_boot(cfg, ws_root)
 
+    journal_mounted = False
     for entry in parse_paths(cfg.get("paths", "")):
         path, mode = entry.path, entry.mode
         p = Path(path).resolve()
@@ -1470,8 +1589,14 @@ def mount_overlays(cfg):
         res = run(["mount", "-t", "overlay", "overlay", "-o", opts, str(p)], check=False)
         if res.returncode == 0:
             log(f"MOUNTED: {p} policy={mode}")
+            journal_mounted |= holds_journal(p)
         else:
             log(f"MOUNT_FAILED: {p}", "ERROR")
+
+    # journald was moved to /run before the teardown (or is still there from
+    # boot); bring it back onto the new overlay.
+    if journal_mounted:
+        journal_reclaim()
 
 def is_opaque_dir(path: str, files) -> bool:
     """True if upper directory 'path' is opaque (hides everything below it in lower).
@@ -1753,8 +1878,19 @@ def flush(cfg, teardown: bool = False):
             continue
         # A signal arriving mid-path is acted on only once this path is back in
         # a consistent state (flushed or preserved, overlay remounted).
+        p = Path(entry.path).resolve()
+        journal = holds_journal(p) and is_overlay_mounted(p)
         with signals_deferred():
-            errors += _flush_path(entry, ws_root, teardown)
+            if journal:
+                journal_relinquish()
+            try:
+                with log_held_during(p):
+                    errors += _flush_path(entry, ws_root, teardown)
+            finally:
+                # On a teardown the overlay stays unmounted; the next mount
+                # moves journald back.
+                if journal and not teardown:
+                    journal_reclaim()
 
     log("FLUSH_COMPLETE: Success" if errors == 0 else f"FLUSH_COMPLETE: {errors} errors",
         "ERROR" if errors else "INFO")
@@ -1948,6 +2084,9 @@ def unmount(cfg, allow_kill: bool = True):
     # Include overlays of paths since removed from the config: left mounted, they
     # would pin the workspace and survive on a lazily-detached copy of it.
     items = list(parse_paths(cfg.get("paths",""))) + orphan_entries(cfg)
+    if any(holds_journal(Path(e.path).resolve()) and is_overlay_mounted(Path(e.path).resolve())
+           for e in items):
+        journal_relinquish()
     # 1) remove any overlay mounted ON the lower bind
     for entry in items:
         path = entry.path
@@ -2234,6 +2373,7 @@ def main():
         if RECONFIGURE:
             cmdline += " --reconfigure"
         log(f"SCRIPT_START: {cmdline}")
+        reclaim_pending_zram()
 
     ok = True
     if cmd == "mount":
