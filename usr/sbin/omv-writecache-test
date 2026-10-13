@@ -6,7 +6,7 @@
 # License version 2. This program is licensed "as is" without any
 # warranty of any kind, whether express or implied.
 #
-# version: 0.2.1
+# version: 0.2.2
 #
 # Test script for omv-writecache
 # Uses the config at /etc/omv-writecache/config.yaml and tests
@@ -31,6 +31,7 @@ from typing import Dict, List, Tuple, Optional, Set
 CONFIG_PATH = Path("/etc/omv-writecache/config.yaml")
 TEST_LOG = Path("/tmp/omv-writecache-test.log")
 SCRIPT_PATH = "/usr/sbin/omv-writecache"
+TEST_VERSION = "0.2.2"
 
 # Optional: only create test files in these paths (leave empty to allow all)
 ALLOWED_FOR_FILE_CREATION = set()  # e.g., {"/var/log", "/var/tmp"} to restrict
@@ -2185,7 +2186,7 @@ class WriteCacheTest:
         mod.lower_bind_is_safe = lambda p: True
         mod.remount_lower = lambda lower, rw, check=False: (rw_ok if rw else True)
         mod.rsync_upper_to_lower = fake_rsync
-        mod.run = lambda cmd, check=True, quiet=False: FakeResult()
+        mod.run = lambda cmd, check=True, quiet=False, **kw: FakeResult()
         mod.sync_upper_attrs = lambda *a, **kw: None
 
         def restore():
@@ -2291,6 +2292,201 @@ class WriteCacheTest:
         log_test("flush read-only lower guard: " + ("OK" if ok_all else "FAIL"),
                  "SUCCESS" if ok_all else "FAIL")
         return ok_all
+
+    def test_flush_busy_syncs_in_place(self) -> bool:
+        """Regression: a routine flush of a busy overlay must not detach it.
+
+        The old code lazily unmounted /var/log every hour because nginx, rsyslog,
+        samba, php-fpm... keep their logs open. They then wrote into the detached
+        upper, which the flush deletes, so everything they logged afterwards was
+        lost. A busy path must now be synced in place from the merged view and
+        stay mounted with its upper intact; a teardown keeps the old path."""
+        log_test("\n>>> Test: busy flush syncs in place instead of detaching", "INFO")
+
+        try:
+            mod = load_writecache_module()
+        except Exception as e:
+            log_test(f"Could not import omv-writecache: {e}", "FAIL")
+            return False
+
+        def attempt(td: Path, teardown: bool):
+            ws = td / "ws"
+            upper, work, lower = (ws / "fake_target" / d for d in ("upper", "work", "lower"))
+            for d in (upper, work, lower):
+                d.mkdir(parents=True, exist_ok=True)
+            (upper / "pending.log").write_text("cached-data")
+            cfg = {"paths": "/fake/target = flush\n", "workspace_root": str(ws),
+                   "workspace_type": "path"}
+
+            state = {"mounted": True}
+            cmds: List[List[str]] = []
+            synced = {"merged": [], "upper": 0}
+
+            class Result:
+                def __init__(self, rc):
+                    self.returncode = rc
+                    self.stdout = ""
+
+            def fake_run(cmd, check=True, quiet=False, **kw):
+                cmds.append(list(cmd))
+                if cmd[:1] == ["umount"]:
+                    if "-l" in cmd:
+                        state["mounted"] = False
+                        return Result(0)
+                    return Result(32)  # always busy
+                return Result(0)
+
+            def fake_merged(merged, lower_dir, **kw):
+                synced["merged"].append(merged)
+                return True
+
+            def fake_upper(*a, **kw):
+                synced["upper"] += 1
+                return True
+
+            names = ("is_workspace_ready", "live_overlay_dirs", "is_overlay_mounted",
+                     "is_mountpoint", "lower_bind_is_safe", "remount_lower",
+                     "rsync_merged_to_lower", "rsync_upper_to_lower", "run",
+                     "sync_upper_attrs", "unmount_if_idle", "orphan_entries")
+            orig = {k: getattr(mod, k) for k in names}
+            orig_idle = mod.unmount_if_idle
+            try:
+                target = str(Path("/fake/target").resolve())
+                mod.is_workspace_ready = lambda cfg: True
+                # The host's own overlays must not reach the fakes below.
+                mod.orphan_entries = lambda cfg: []
+                mod.live_overlay_dirs = lambda p: (
+                    {"lower": str(lower), "upper": str(upper), "work": str(work)}
+                    if state["mounted"] else None)
+                mod.is_overlay_mounted = lambda p: state["mounted"] and str(p) == target
+                mod.is_mountpoint = lambda p: state["mounted"] or str(p) != target
+                mod.lower_bind_is_safe = lambda p: True
+                mod.remount_lower = lambda lower, rw, check=False: True
+                mod.rsync_merged_to_lower = fake_merged
+                mod.rsync_upper_to_lower = fake_upper
+                mod.run = fake_run
+                mod.sync_upper_attrs = lambda *a, **kw: None
+                # Same logic, without the real 1s back-off between attempts.
+                mod.unmount_if_idle = lambda p: orig_idle(p, delay=0)
+                result = mod.flush(cfg, teardown=teardown)
+            finally:
+                for k, v in orig.items():
+                    setattr(mod, k, v)
+            kept = (upper / "pending.log").is_file()
+            return result, cmds, synced, kept, state["mounted"]
+
+        ok_all = True
+
+        def check(label, cond):
+            nonlocal ok_all
+            log_test(f"  {label}: {'OK' if cond else 'FAIL'}", "SUCCESS" if cond else "FAIL")
+            ok_all &= bool(cond)
+
+        with tempfile.TemporaryDirectory() as td:
+            result, cmds, synced, kept, mounted = attempt(Path(td), teardown=False)
+        check("routine flush never lazy-unmounts",
+              not any(c[:1] == ["umount"] and "-l" in c for c in cmds))
+        check("busy overlay stays mounted", mounted)
+        check("merged view synced once", synced["merged"] == [str(Path("/fake/target").resolve())])
+        check("upper not used as the sync source", synced["upper"] == 0)
+        check("upper kept (open files still write to it)", kept)
+        check("no overlay remount", not any(c[:2] == ["mount", "-t"] for c in cmds))
+        check("flush reports success", result is True)
+
+        # Control: a teardown still unmounts (lazily, if it must) and syncs the upper.
+        with tempfile.TemporaryDirectory() as td:
+            result, cmds, synced, kept, mounted = attempt(Path(td), teardown=True)
+        check("teardown does not sync in place", synced["merged"] == [])
+        check("teardown syncs the upper", synced["upper"] == 1)
+
+        log_test("busy flush in place: " + ("OK" if ok_all else "FAIL"),
+                 "SUCCESS" if ok_all else "FAIL")
+        return bool(ok_all)
+
+    def test_flush_in_place_keeps_open_files(self) -> bool:
+        """Real overlay: flushing while a file is held open must write its data
+        to disk, apply deletions, and leave later writes to that fd visible.
+        A mount below the path must be skipped, not deleted from the lower."""
+        log_test("\n>>> Test: in-place flush with an open file (real overlay)", "INFO")
+
+        try:
+            mod = load_writecache_module()
+        except Exception as e:
+            log_test(f"Could not import omv-writecache: {e}", "FAIL")
+            return False
+        if not hasattr(mod, "_flush_in_place"):
+            log_test(f"{SCRIPT_PATH} has no in-place flush", "FAIL")
+            return False
+
+        ok_all = True
+
+        def check(label, cond):
+            nonlocal ok_all
+            log_test(f"  {label}: {'OK' if cond else 'FAIL'}", "SUCCESS" if cond else "FAIL")
+            ok_all &= bool(cond)
+
+        td = Path(tempfile.mkdtemp(prefix="wc-inplace-"))
+        target = (td / "target").resolve()
+        ws = td / "ws"
+        name = mod.sanitize_name(str(target))
+        lower, upper, work = (ws / name / d for d in ("lower", "upper", "work"))
+        sub = target / "sub"
+        mounted = []
+        fh = None
+        try:
+            for d in (target, lower, upper, work, sub):
+                d.mkdir(parents=True, exist_ok=True)
+            (target / "old.log").write_text("old\n")
+            (target / "gone.log").write_text("gone\n")
+            (sub / "keep").write_text("keep\n")
+
+            def sh(*cmd):
+                r = subprocess.run(list(cmd), stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True)
+                if r.returncode != 0:
+                    raise RuntimeError(f"{' '.join(cmd)}: {r.stdout.strip()}")
+
+            sh("mount", "--bind", str(target), str(lower)); mounted.append(lower)
+            sh("mount", "--make-private", str(lower))
+            sh("mount", "-o", "remount,bind,ro", str(lower))
+            sh("mount", "-t", "overlay", "overlay", "-o",
+               f"lowerdir={lower},upperdir={upper},workdir={work},"
+               f"metacopy=off,redirect_dir=off,index=off", str(target)); mounted.append(target)
+            # Hides sub/keep in the merged view; --delete must not take it from lower.
+            sh("mount", "-t", "tmpfs", "tmpfs", str(sub)); mounted.append(sub)
+
+            fh = open(target / "app.log", "a")
+            fh.write("before\n"); fh.flush()
+            os.remove(target / "gone.log")
+
+            entry = mod.PathEntry(str(target), "flush", None, None, None)
+            errors = mod._flush_path(entry, ws, teardown=False)
+
+            fh.write("after\n"); fh.flush()
+
+            check("flush reported no errors", errors == 0)
+            check("overlay still mounted", check_overlay_mounted(str(target)))
+            check("open file's data reached disk",
+                  (lower / "app.log").is_file() and (lower / "app.log").read_text() == "before\n")
+            check("write after flush not lost",
+                  (target / "app.log").read_text() == "before\nafter\n")
+            check("deletion applied to disk", not (lower / "gone.log").exists())
+            check("untouched file intact", (lower / "old.log").read_text() == "old\n")
+            check("mount below path skipped", (lower / "sub" / "keep").is_file())
+        except Exception as e:
+            log_test(f"  setup/flush error: {e}", "FAIL")
+            ok_all = False
+        finally:
+            if fh:
+                fh.close()
+            for m in reversed(mounted):
+                subprocess.run(["umount", str(m)], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+            shutil.rmtree(td, ignore_errors=True)
+
+        log_test("in-place flush with open file: " + ("OK" if ok_all else "FAIL"),
+                 "SUCCESS" if ok_all else "FAIL")
+        return bool(ok_all)
 
     def test_unmount_escalation_order(self) -> bool:
         """Regression: force_unmount_with_retry() must try a plain umount before a
@@ -2466,6 +2662,8 @@ class WriteCacheTest:
             "flush_preserves_upper_on_failure": False,
             "flush_aborts_on_readonly_lower": False,
             "unmount_escalation_order": False,
+            "flush_busy_syncs_in_place": False,
+            "flush_in_place_keeps_open_files": False,
             "postfix_baseline": False,
             "postfix_after_mount": False,
             "postfix_after_flush": False,
@@ -2490,6 +2688,9 @@ class WriteCacheTest:
             # to run before anything is mounted.
             results["flush_preserves_upper_on_failure"] = self.test_flush_preserves_upper_on_failure()
             results["flush_aborts_on_readonly_lower"] = self.test_flush_aborts_on_readonly_lower()
+            results["flush_busy_syncs_in_place"] = self.test_flush_busy_syncs_in_place()
+            # Real mounts, but only of its own temp dirs.
+            results["flush_in_place_keeps_open_files"] = self.test_flush_in_place_keeps_open_files()
             results["unmount_escalation_order"] = self.test_unmount_escalation_order()
             results["unmount_skips_kill_for_var_log"] = self.test_unmount_skips_kill_for_var_log()
 
@@ -2658,6 +2859,10 @@ def main():
 
     require_root()
     ensure_script()
+
+    ver = subprocess.run([SCRIPT_PATH, "version"], stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True).stdout.strip()
+    log_test(f"omv-writecache-test v{TEST_VERSION}, testing {SCRIPT_PATH} v{ver or '?'}", "INFO")
 
     # Load config once early to fail fast if malformed
     try:
